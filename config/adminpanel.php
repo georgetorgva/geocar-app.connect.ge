@@ -108,7 +108,7 @@ $confs = [
                 //                'accessibility' => ['title' => 'Accessibility', 'icon' => 'fa-user', 'type' => 'menu'],
             ]
         ],
-
+/*** /
         'subscription' => [
             'module' => 'customModule',
             'modulePart' => 'subscribers',
@@ -138,7 +138,7 @@ $confs = [
                 ]
             ],
         ],
-
+        /***/
         /*** /
                 'google_analytics' => [
                     'title' => 'Google Analytics',
@@ -153,7 +153,7 @@ $confs = [
                 ],
         /***/
         'stringTranslations' => ['title' => 'String Translations', 'icon' => 'fa-font', 'type' => 'menu'],
-        'onlineForms' => ['title' => 'Site Online Forms', 'icon' => 'fa-list-alt', 'type' => 'menu'],
+//        'onlineForms' => ['title' => 'Site Online Forms', 'icon' => 'fa-list-alt', 'type' => 'menu'],
         'taxonomy' => ['title' => 'Taxonomies', 'icon' => 'fa-window', 'type' => 'menu'],
         'widgets' => ['title' => 'Custom Widgets', 'icon' => 'fa-window', 'type' => 'menu'],
 

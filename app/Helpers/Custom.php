@@ -126,57 +126,40 @@ function encodeJson($data = [])
 /** checks if array element exists and check type */
 function _cv($Array = [], $key = false, $CheckType = 'empty')
 {
-
-//    $Array = _toArray($Array);
-    $Array = json_decode( json_encode($Array, JSON_UNESCAPED_UNICODE), 1);
-
     if ($key === false) {
         return false;
     }
 
-    if (!is_array($key)) {
-        $key = explode('.', $key);
+    // Convert objects/Eloquent models to plain arrays; skip for native arrays (common case)
+    if (is_object($Array)) {
+        $Array = json_decode(json_encode($Array, JSON_UNESCAPED_UNICODE), true);
     }
+
+    $key = is_array($key) ? $key : explode('.', (string)$key);
     $tmp = $Array;
 
     foreach ($key as $v) {
-        if (!isset($tmp[$v])) {
+        if (!is_array($tmp) || !isset($tmp[$v])) {
             return false;
         }
         $tmp = $tmp[$v];
     }
 
-    if ($CheckType == 'empty' && !empty($tmp)) {
-        $tmp;
-    } elseif ($CheckType == 'empty') {
-        return false;
+    switch ($CheckType) {
+        case 'empty':
+            return !empty($tmp) ? $tmp : false;
+        case 'num':
+            return is_numeric($tmp) ? $tmp : false;
+        case 'nn':
+            return (is_numeric($tmp) && $tmp != 0) ? $tmp : false;
+        case 'ar':
+            return is_array($tmp) ? $tmp : false;
+        default:
+            if (is_numeric($CheckType)) {
+                return strlen((string)$tmp) == (int)$CheckType ? $tmp : false;
+            }
+            return $tmp;
     }
-
-    if ($CheckType == 'num' && is_numeric($tmp)) {
-        return $tmp;
-    } elseif ($CheckType == 'num') {
-        return false;
-    }
-
-    if ($CheckType == 'nn' && is_numeric($tmp) && $tmp != 0) {
-        $tmp;
-    } elseif ($CheckType == 'nn') {
-        return false;
-    }
-
-    if ($CheckType == 'ar' && is_array($tmp)) {
-        $tmp;
-    } elseif ($CheckType == 'ar') {
-        return false;
-    }
-
-    if (is_numeric($CheckType) && strlen($tmp) == $CheckType) {
-        $tmp;
-    } elseif (is_numeric($CheckType)) {
-        return false;
-    }
-
-    return $tmp;
 }
 
 /** prepare sql data. check if field is json encripted and decript */

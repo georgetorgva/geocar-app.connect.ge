@@ -38,407 +38,461 @@ class SmartTableModel extends Model
 
     public function getList($params = [])
     {
-//        p($params);
-//        DB::select("SET group_concat_max_len = 100000000");
-        if(_cv($params, 'fieldConfigs'))$this->fieldConfigs = $params['fieldConfigs'];
+        // =====================================================================
+        // STEP 1 — Resolve field configuration
+        //
+        // fieldConfigs can be supplied in three forms:
+        //   a) Array of config objects  → fields from all are merged into [0]
+        //   b) Single config array with a 'fields' key → used as-is
+        //   c) String (dot-notation key) → loaded via Laravel config()
+        //
+        // Child models set $this->fieldConfigs in their constructor or as a
+        // class property. Callers can override it per-call via params['fieldConfigs'].
+        // =====================================================================
+        if (_cv($params, 'fieldConfigs')) $this->fieldConfigs = $params['fieldConfigs'];
 
-        if(is_array($this->fieldConfigs) && isset($this->fieldConfigs[0])){
+        if (is_array($this->fieldConfigs) && isset($this->fieldConfigs[0])) {
+            // Multiple config arrays supplied — merge all 'fields' into the first config
             $fields = $this->fieldConfigs[0];
-            foreach($this->fieldConfigs as $value){
-                foreach($value['fields'] as $key => $field){
+            foreach ($this->fieldConfigs as $value) {
+                foreach ($value['fields'] as $key => $field) {
                     $fields['fields'][$key] = $field;
                 }
             }
-        }else if(_cv($this->fieldConfigs, 'fields')){
+        } else if (_cv($this->fieldConfigs, 'fields')) {
+            // Direct config array passed (already has 'fields' key)
             $fields = $this->fieldConfigs;
         } else {
+            // String config key — load from config files (e.g. 'adminpanel.content_types.news')
             $fields = config($this->fieldConfigs);
         }
 
-        $translate = requestLan(_cv($params, 'translate'));
+        // =====================================================================
+        // STEP 2 — Initialize state
+        //
+        // $enableOrdering: set to false when filtering by specific IDs so that
+        //   FIELD() ordering (which preserves caller-supplied ID order) is used.
+        // $selectPart: accumulates all SELECT expressions, assembled at query time.
+        // sortDirection/sortField are accepted as aliases for orderDirection/orderField
+        //   to support older callers.
+        // =====================================================================
+        $translate      = requestLan(_cv($params, 'translate'));
         $enableOrdering = true;
-        $selectPart = [];
+        $selectPart     = [];
 
-        /// join with tables
-        $tableJoinSelect = [];
+        $returnData = [
+            'listCount' => 0,
+            'list'      => [],
+            'page'      => _cv($params, 'page', 'nn') ? $params['page'] : 1,
+        ];
+
+        if (_cv($params, ['sortDirection']) && !_cv($params, ['orderDirection'])) $params['orderDirection'] = $params['sortDirection'];
+        if (_cv($params, ['sortField'])     && !_cv($params, ['orderField']))     $params['orderField']     = $params['sortField'];
+
+        // =====================================================================
+        // STEP 3 — Prepare config-defined join table metadata
+        //
+        // Reads the 'join' section of field config and builds three structures:
+        //
+        //   $tableJoinSelect        — (unused directly, kept for future use)
+        //   $tableJoinSelectFilters — maps param keys to joined-table filter rules;
+        //                             used in STEP 8 to apply WHERE conditions on
+        //                             columns from config-joined tables
+        //   $tableJoinOn            — list of join definitions applied in STEP 7;
+        //                             deferred so that JOINs are applied before WHERE
+        //
+        // The alias pattern "joinedTable_{tableName}" avoids collisions when the
+        // same table is joined more than once under different prefixes.
+        //
+        // NOTE: $tableName is now computed outside the inner 'select' loop to
+        // correctly handle join entries that have no 'select' block.
+        // =====================================================================
+        $tableJoinSelect        = [];
         $tableJoinSelectFilters = [];
-        $tableJoinOn = [];
+        $tableJoinOn            = [];
 
-        if(_cv($fields, ['join'], 'ar')) {
-            foreach ($fields['join'] as $k=>$v){
-                if(_cv($v, 'tablePrefix')){
-                    $tableName = $v['tablePrefix'];
-                } else {
-                    $tableName = $v['joinTable'];
-                }
+        if (_cv($fields, ['join'], 'ar')) {
+            foreach ($fields['join'] as $k => $v) {
+                // tablePrefix overrides joinTable as the alias base name
+                $tableName = _cv($v, 'tablePrefix') ? $v['tablePrefix'] : $v['joinTable'];
 
-                if(isset($v['select'])){
-                    foreach ($v['select'] as $kk=>$vv){
+                if (isset($v['select'])) {
+                    foreach ($v['select'] as $kk => $vv) {
+                        $whereQuery  = isset($vv['where']) ? $vv['where'] : $vv;
+                        $selectQuery = isset($vv['select']) ? $vv['select'] : "joinedTable_{$tableName}.{$kk}";
 
-                        $whereQuery = isset($vv['where'])?$vv['where']:$vv;
-
-                        $selectQuery = isset($vv['select'])?$vv['select']:"joinedTable_{$tableName}.{$kk}";
                         $selectPart[] = "{$selectQuery} as {$tableName}_{$kk}";
-                        $tableJoinSelectFilters["{$v['joinTable']}_{$kk}"] = ['filterType'=>$whereQuery, 'table'=>"joinedTable_{$tableName}", 'fieldAs'=>"{$v['joinTable']}_{$kk}", 'field'=>$kk];
+
+                        // Register filter rule so STEP 8 knows how to WHERE on this column
+                        $tableJoinSelectFilters["{$v['joinTable']}_{$kk}"] = [
+                            'filterType' => $whereQuery,
+                            'table'      => "joinedTable_{$tableName}",
+                            'fieldAs'    => "{$v['joinTable']}_{$kk}",
+                            'field'      => $kk,
+                        ];
                     }
                 }
-                $tableJoinOn[] = [ 'joinTable'=>$v['joinTable'], 'joinField'=>$v['joinField'], 'joinOn'=>$v['joinOn'], 'tablePrefix'=>$tableName, 'sameStatus'=>$v['sameStatus'] ?? true, 'whereRaw'=>_cv($v, 'whereRaw')];
+
+                $tableJoinOn[] = [
+                    'joinTable'   => $v['joinTable'],
+                    'joinField'   => $v['joinField'],
+                    'joinOn'      => $v['joinOn'],
+                    'tablePrefix' => $tableName,
+                    'sameStatus'  => $v['sameStatus'] ?? true,
+                    'whereRaw'    => _cv($v, 'whereRaw'),
+                ];
             }
         }
 
-/// start time tracking
-        $time_start = microtime(true);
+        // =====================================================================
+        // STEP 4 — Start base query builder
+        // =====================================================================
+        $qr = DB::table($this->table);
 
-        $returnData['listCount'] = 0;
-        $returnData['list'] = [];
-        $returnData['page'] = _cv($params, 'page', 'nn')?$params['page']:1;
-        if(_cv($params, ['sortDirection']) && !_cv($params, ['orderDirection']))$params['orderDirection'] = $params['sortDirection'];
-        if(_cv($params, ['sortField']) && !_cv($params, ['orderField']))$params['orderField'] = $params['sortField'];
-        ///sortDirection
-        DB::enableQueryLog();
+        // =====================================================================
+        // STEP 5 — Meta table: per-field filter JOINs only
+        //
+        // For each field in fields['fields'] that has an active filter param
+        // or a whereRaw clause, we LEFT JOIN the meta table under the alias
+        // "meta_{fieldName}" so WHERE conditions can reference those rows.
+        //
+        // Translatable fields join for the current request language; non-
+        // translatable fields join for the language-neutral slot ('xx').
+        //
+        // *** IMPORTANT — GROUP_CONCAT subquery removed ***
+        // The original code embedded a GROUP_CONCAT subquery that packed every
+        // meta row into a single string per record and then had PHP unpack it
+        // via decodeJoinedMetaData(). This caused:
+        //   — A heavy subquery in the FROM/JOIN clause on every getList call
+        //   — GROUP_CONCAT string size limits on wide meta tables
+        //   — Extra PHP string-parsing overhead (explode on custom separators)
+        //
+        // Meta data is now loaded in a separate targeted query after the main
+        // result set is known (see STEP 17). The output structure is identical.
+        // =====================================================================
+        if ($this->metaTable && _cv($fields, ['fields'])) {
+            foreach ($fields['fields'] as $k => $v) {
+                // Only join if there is an active filter or an unconditional whereRaw
+                if (!isset($params[$k]) && !isset($v['whereRaw'])) continue;
 
-        $qr = DB::table($this -> table);
-
-
-        //// meta table fields
-        if($this->metaTable){
-            /// if filter by some meta field
-            if(_cv($fields,['fields']) ){
-
-                foreach ($fields['fields'] as $k=>$v){
-                    if(!isset($params[$k]) && !isset($v['whereRaw']))continue;
-
-                    $metaTableName = "meta_{$k}";
-                    $qr->leftJoin("{$this->metaTable} as {$metaTableName}", function($join) use ($k, $v, $translate, $metaTableName){
-                        if(isset($v['translate']) && $v['translate']==1){
-                            $join->on("{$metaTableName}.table_id", "=", "{$this->table}.id")->where("{$metaTableName}.key", $k)->where("{$metaTableName}.lan", $translate)->where("{$metaTableName}.table", $this->table);
-                        }else{
-                            $join->on("{$metaTableName}.table_id", "=", "{$this->table}.id")->where("{$metaTableName}.key", $k)->where("{$metaTableName}.lan", 'xx')->where("{$metaTableName}.table", $this->table);
-                        }
-                    });
-
-                    if(isset($v['whereRaw'])){
-                        $qr->whereRaw($v['whereRaw']);
+                $metaTableName = "meta_{$k}";
+                $qr->leftJoin("{$this->metaTable} as {$metaTableName}", function ($join) use ($k, $v, $translate, $metaTableName) {
+                    if (isset($v['translate']) && $v['translate'] == 1) {
+                        // Translatable field: join for the requested language only
+                        $join->on("{$metaTableName}.table_id", '=', "{$this->table}.id")
+                            ->where("{$metaTableName}.key",   $k)
+                            ->where("{$metaTableName}.lan",   $translate)
+                            ->where("{$metaTableName}.table", $this->table);
+                    } else {
+                        // Non-translatable field: language-neutral slot ('xx')
+                        $join->on("{$metaTableName}.table_id", '=', "{$this->table}.id")
+                            ->where("{$metaTableName}.key",   $k)
+                            ->where("{$metaTableName}.lan",   'xx')
+                            ->where("{$metaTableName}.table", $this->table);
                     }
+                });
 
-                    if(isset($v['dbFilter']) && isset($params[$k])){
-                        if($v['dbFilter'] == 'whereIn'){
-                            if(!is_array($params[$k]))$params[$k] = [$params[$k]];
-                            $qr -> whereIn("{$metaTableName}.val", $params[$k]);
+                if (isset($v['whereRaw'])) {
+                    $qr->whereRaw($v['whereRaw']);
+                }
 
-                        }elseif ($v['dbFilter'] == 'like'){
-                            $qr -> where("{$metaTableName}.val",  'like', "%{$params[$k]}%");
-
-                        }elseif ($v['dbFilter'] == 'where'){
-                            $qr -> where("{$metaTableName}.val",  $params[$k]);
-
-                        }elseif ($v['dbFilter'] == 'range'){
-                            if(!is_array($params[$k]))$params[$k] = [$params[$k]];
-
-                            if(count($params[$k])>=2){
-                                $qr -> whereBetween("{$metaTableName}.val",  $params[$k]);
-                            }else{
-                                $qr -> where("{$metaTableName}.val",  $params[$k]);
-                            }
-                        }elseif ($v['dbFilter'] == '>'){
-                            $qr -> where("{$metaTableName}.val", '>', $params[$k]);
-                        }elseif ($v['dbFilter'] == '<'){
-                            $qr -> where("{$metaTableName}.val", '<', $params[$k]);
+                // Apply the configured filter type for this meta field
+                if (isset($v['dbFilter']) && isset($params[$k])) {
+                    if ($v['dbFilter'] == 'whereIn') {
+                        if (!is_array($params[$k])) $params[$k] = [$params[$k]];
+                        $qr->whereIn("{$metaTableName}.val", $params[$k]);
+                    } elseif ($v['dbFilter'] == 'like') {
+                        $qr->where("{$metaTableName}.val", 'like', "%{$params[$k]}%");
+                    } elseif ($v['dbFilter'] == 'where') {
+                        $qr->where("{$metaTableName}.val", $params[$k]);
+                    } elseif ($v['dbFilter'] == 'range') {
+                        if (!is_array($params[$k])) $params[$k] = [$params[$k]];
+                        if (count($params[$k]) >= 2) {
+                            $qr->whereBetween("{$metaTableName}.val", $params[$k]);
+                        } else {
+                            $qr->where("{$metaTableName}.val", $params[$k]);
                         }
+                    } elseif ($v['dbFilter'] == '>') {
+                        $qr->where("{$metaTableName}.val", '>', $params[$k]);
+                    } elseif ($v['dbFilter'] == '<') {
+                        $qr->where("{$metaTableName}.val", '<', $params[$k]);
                     }
-
                 }
             }
-
-
-//            $selectPart[] = 'GROUP_CONCAT(CONCAT('.$this->metaTable.'.key, "----GROUP_CONCATED_KEY_VAL_SEPARATOR----", '.$this->metaTable.'.val, "----GROUP_CONCATED_KEY_VAL_SEPARATOR----", '.$this->metaTable.'.lan , "----GROUP_CONCATED_FIELD_END----" ) SEPARATOR "") as metas';
-
-            /// get only exact meta fields if needed
-            $metaKeys = _cv($params, 'meta_keys', 'ar');
-
-            $ttmp = '';
-            if (is_array($metaKeys)) {
-                $ttmp = "'".implode("','", $metaKeys)."'";
-                $ttmp = " and pm.`key` in ({$ttmp}) ";
-            }
-
-            //// sub query for meta content
-//            $selectPart[] = '
-//            (select
-//            GROUP_CONCAT(CONCAT(pm.key, "----GROUP_CONCATED_KEY_VAL_SEPARATOR----", pm.val, "----GROUP_CONCATED_KEY_VAL_SEPARATOR----", pm.lan , "----GROUP_CONCATED_FIELD_END----" ) SEPARATOR "")
-//            FROM '.$this->metaTable.' pm
-//            WHERE pm.table_id = '.$this -> table.'.id '.$ttmp.' and pm.table = "'.$this->table.'"
-//            ) AS metas
-//            ';
-
-            $metasQuery = DB::table($this->metaTable . ' as pm')
-                ->selectRaw('pm.table_id, GROUP_CONCAT(CONCAT(pm.key, "----GROUP_CONCATED_KEY_VAL_SEPARATOR----", pm.val, "----GROUP_CONCATED_KEY_VAL_SEPARATOR----", pm.lan, "----GROUP_CONCATED_FIELD_END----") SEPARATOR "") AS metas')
-                ->where('pm.table', $this->table)
-                ->groupBy('pm.table_id');
-
-            $qr->leftJoinSub($metasQuery, 'metas', function ($join) {
-                $join->on('metas.table_id', '=', $this->table . '.id');
-            });
-
-            $selectPart[] = 'metas.metas';
-
         }
 
-//        p($params);
-        /// get related taxonomies
-        if(_cv($fields, 'taxonomy', 'ar') || _cv($params, 'relate.taxonomy')){
+        // =====================================================================
+        // STEP 6 — Taxonomy: filter JOINs only (SELECT-side join deferred)
+        //
+        // When taxonomy filtering is active, per-group LEFT JOINs and whereIn
+        // conditions are added here — before the COUNT query — so they affect
+        // which records are counted and returned.
+        //
+        // The base taxonomy_relation + taxonomy JOIN used for the GROUP_CONCAT
+        // SELECT expression is intentionally deferred to STEP 10 (after COUNT).
+        // It produces no WHERE conditions and its rows are deduplicated by the
+        // GROUP BY in STEP 13, so moving it after COUNT is safe and reduces the
+        // complexity of the COUNT query.
+        //
+        // AND filter: each taxonomy group gets its own aliased JOIN + whereIn.
+        //   Records must belong to ALL specified taxonomy groups (AND logic).
+        //
+        // OR filter: all taxonomy IDs across groups are merged into a single
+        //   whereIn (OR logic: record must match any of the given IDs).
+        // =====================================================================
+        if (_cv($fields, 'taxonomy', 'ar') || _cv($params, 'relate.taxonomy')) {
+            // Backward compat: 'taxonomies' is accepted as alias for 'taxonomy'
+            if (!_cv($params, 'taxonomy', 'ar') && _cv($params, 'taxonomies', 'ar')) {
+                $params['taxonomy'] = $params['taxonomies'];
+            }
 
-            $qr -> leftJoin("{$this -> taxonomyRelationTable} as taxonomy_relation", function($join) use ($params){
-                $join -> on("taxonomy_relation.data_id", '=', $this -> table . '.id')->where("taxonomy_relation.table", $this -> table);
-            })->leftJoin("taxonomy", "taxonomy.id", '=', "taxonomy_relation.taxonomy_id");
+            // AND taxonomy filter
+            if (_cv($params, 'taxonomy', 'ar')) {
+                foreach ($params['taxonomy'] as $attrKey => $attrValues) {
+                    if (count($params['taxonomy'][$attrKey]) == 0) continue;
 
-            /// for older versions; make taxonomies = taxonomy
-            if(!_cv($params, 'taxonomy', 'ar') && _cv($params, 'taxonomies', 'ar'))$params['taxonomy'] = $params['taxonomies'];
-            /// filter by related taxonomies
-            if (_cv($params, 'taxonomy', 'ar'))
-            {
-                foreach ($params['taxonomy'] as $attrKey => $attrValues)
-                {
-                    if(count($params['taxonomy'][$attrKey])==0)continue;
-
-                    $qr -> leftJoin("{$this -> taxonomyRelationTable} as {$this -> taxonomyRelationTable}_{$attrKey}", function($join) use ($params, $attrKey){
-                        $join -> on("{$this -> taxonomyRelationTable}_{$attrKey}.data_id", '=', "{$this -> table}.id")->where( "{$this -> taxonomyRelationTable}_{$attrKey}.table", $this -> table );
-                    }) -> whereIn("{$this -> taxonomyRelationTable}_{$attrKey}.taxonomy_id", $attrValues);
-
+                    $qr->leftJoin(
+                        "{$this->taxonomyRelationTable} as {$this->taxonomyRelationTable}_{$attrKey}",
+                        function ($join) use ($attrKey) {
+                            $join->on("{$this->taxonomyRelationTable}_{$attrKey}.data_id", '=', "{$this->table}.id")
+                                ->where("{$this->taxonomyRelationTable}_{$attrKey}.table", $this->table);
+                        }
+                    )->whereIn("{$this->taxonomyRelationTable}_{$attrKey}.taxonomy_id", $attrValues);
                 }
             }
 
-            if (_cv($params, 'taxonomies_or', 'ar'))
-            {
-
+            // OR taxonomy filter
+            if (_cv($params, 'taxonomies_or', 'ar')) {
                 $tmpTaxonomiesOrIds = [];
-                foreach ($params['taxonomies_or'] as $attrKey => $attrValues)
-                {
-                    if(count($params['taxonomies_or'][$attrKey])==0)continue;
-
+                foreach ($params['taxonomies_or'] as $attrKey => $attrValues) {
+                    if (count($params['taxonomies_or'][$attrKey]) == 0) continue;
                     $tmpTaxonomiesOrIds = array_merge($tmpTaxonomiesOrIds, $attrValues);
                 }
-                $qr -> leftJoin("{$this -> taxonomyRelationTable} as taxonomy_relation_or", function($join) use ($params){
-                    $join -> on("taxonomy_relation_or.data_id", '=', $this -> table . '.id')->where("taxonomy_relation_or.table", $this -> table);
-                }) -> whereIn("taxonomy_relation_or.taxonomy_id", $tmpTaxonomiesOrIds);
-
-            }
-
-            $selectPart[] = 'CONCAT("{", GROUP_CONCAT(DISTINCT CONCAT("\"", `taxonomy`.`id`,"\":","\"",`taxonomy`.`taxonomy`,"\"")), "}") AS `taxonomy`';
-        }
-
-        if(_cv($fields, 'relations', 'ar')){
-            foreach ($fields['relations'] as $k=>$v){
-
-                $qr -> leftJoin(DB::raw( "
-                        ( SELECT {$v['id']}, CONCAT(\"[\", GROUP_CONCAT(distinct relation_{$v['module']}.{$v['data_id']}), \"]\") AS `relation_{$v['module']}`
-                            FROM {$v['table']} as relation_{$v['module']} WHERE `table` = '{$v['module']}' GROUP BY {$v['id']} ) as relation_{$v['module']}" ),
-                    "relation_{$v['module']}.{$v['id']}",
-                    "=",
-                    "{$this -> table}.id");
-
-                $selectPart[] = "relation_{$v['module']}";
-
+                $qr->leftJoin(
+                    "{$this->taxonomyRelationTable} as taxonomy_relation_or",
+                    function ($join) {
+                        $join->on('taxonomy_relation_or.data_id', '=', $this->table . '.id')
+                            ->where('taxonomy_relation_or.table', $this->table);
+                    }
+                )->whereIn('taxonomy_relation_or.taxonomy_id', $tmpTaxonomiesOrIds);
             }
         }
 
-        if(_cv($fields,['customSelectFields'], 'ar')){
-//            customSelectFields
-            foreach ($fields['customSelectFields'] as $k=>$v){
-                $selectPart[] = $v;
-            }
+        // =====================================================================
+        // STEP 7 — Apply config-defined table JOINs ($tableJoinOn)
+        //
+        // Joins declared in fields['join'] (prepared in STEP 3) are applied here,
+        // before the COUNT query, because $tableJoinSelectFilters WHERE conditions
+        // (applied in STEP 8) reference the aliased tables produced by these joins.
+        //
+        // Each join uses alias "joinedTable_{tableName}" to avoid name collisions.
+        // When sameStatus === true, the status filter is mirrored onto the joined
+        // table so that joined rows also match the requested status.
+        // =====================================================================
+        foreach ($tableJoinOn as $v) {
+            $tableName = _cv($v, 'tablePrefix') ? $v['tablePrefix'] : $v['joinTable'];
 
+            $qr->leftJoin("{$v['joinTable']} as joinedTable_{$tableName}", function ($join) use ($tableName, $v, $params) {
+                $join->on("joinedTable_{$tableName}.{$v['joinField']}", '=', "{$this->table}.{$v['joinOn']}");
+
+                // Mirror the status filter onto the joined table when configured
+                if (_cv($v, 'sameStatus') === true && _cv($params, 'status', 'ar')) {
+                    $join->whereIn("joinedTable_{$tableName}.status", $params['status']);
+                }
+
+                if (_cv($v, 'whereRaw', 'ar')) {
+                    foreach ($v['whereRaw'] as $vv) {
+                        $join->whereRaw($vv);
+                    }
+                }
+            });
         }
 
-        $selectPart[] = _cv($params, ['regularFieldsSelect'], 'ar')?"{$this->table}.".implode(", {$this->table}.", $params['regularFieldsSelect']):"{$this->table}.*";
-        $selectPart[] = "modules_sitemap_relations.sitemap_id as relatedSitemap";
+        // =====================================================================
+        // STEP 8 — Apply all WHERE filter conditions
+        //
+        // All user-supplied filter params are translated into WHERE clauses here.
+        // This entire block runs BEFORE the COUNT query (STEP 9) to ensure the
+        // count reflects the correctly filtered result set.
+        //
+        // Sections:
+        //   id           — whereIn + FIELD() ordering (disables default ORDER BY)
+        //   slug         — whereIn
+        //   status       — whereIn
+        //   searchText   — LIKE on searchable regular fields OR meta.val
+        //                  (uses parameterized bindings — replaces addslashes)
+        //   searchBy     — per-field WHERE / LOCATE on adminListFields
+        //                  (user value bound via ? — replaces direct interpolation)
+        //   regularFields— per-field dbFilter rules (whereIn/like/where/range/>/<)
+        //   whereRaw     — array of raw AND conditions
+        //   orWhereRaw   — array of raw OR conditions (wrapped in a group)
+        //   sort         — exact match on sort column
+        //   tableJoinSelectFilters — WHERE on columns from config-defined joins
+        //   customJsonFilter — JSON column containment filters
+        // =====================================================================
 
-        if(_cv($params, 'customSelect')){
-            $selectPart[] = $params['customSelect'];
-        }
-//p($selectPart);
-
+        // --- id ---
+        // When filtering by specific IDs, disable default ordering and use FIELD()
+        // so MySQL returns rows in the exact caller-supplied ID order.
         if (_cv($params, ['id']) && !_cv($params, ['id'], 'ar')) $params['id'] = [$params['id']];
         if (_cv($params, 'id', 'ar')) {
             $enableOrdering = false;
-            $qr -> whereIn("{$this->table}.id", $params['id'])->orderByRaw("FIELD({$this->table}.id, ".implode(',',$params['id']).")");
+            $qr->whereIn("{$this->table}.id", $params['id'])
+                ->orderByRaw("FIELD({$this->table}.id, " . implode(',', $params['id']) . ")");
         }
 
+        // --- slug ---
         if (_cv($params, ['slug']) && !_cv($params, ['slug'], 'ar')) $params['slug'] = [$params['slug']];
-        if (_cv($params, 'slug','ar')) $qr -> whereIn("{$this->table}.slug", $params['slug']);
+        if (_cv($params, 'slug', 'ar')) $qr->whereIn("{$this->table}.slug", $params['slug']);
 
+        // --- status ---
         if (_cv($params, ['status']) && !_cv($params, ['status'], 'ar')) $params['status'] = [$params['status']];
-        if (_cv($params, 'status','ar')) $qr -> whereIn("{$this->table}.status", $params['status']);
+        if (_cv($params, 'status', 'ar')) $qr->whereIn("{$this->table}.status", $params['status']);
 
-        if (_cv($params, ['searchText'])){
+        // --- searchText ---
+        // Searches across all 'searchable' regular fields (via CONCAT LIKE) and
+        // all meta values for the active language (via meta.val LIKE).
+        // Switched from addslashes() + string interpolation to parameterized
+        // bindings (?), which is the correct way to prevent SQL injection.
+        if (_cv($params, ['searchText'])) {
+            $safeSearch      = strip_tags($params['searchText']);
+            $searchWhereParts = [];
 
-            $params['searchText'] = strip_tags(addslashes($params['searchText']));
-            $whereTmps = [];
-            if(_cv($fields, ['regularFields'])){
-                $tmp = '"-"';
-                foreach ($fields['regularFields'] as $k=>$v){
-                    if(isset($v['searchable'])){
-                        $tmp .= ",IFNULL({$this->table}.{$k}, '-')";
+            // Build a CONCAT of all searchable regular-table columns
+            if (_cv($fields, ['regularFields'])) {
+                $concatExpr = '"-"';
+                foreach ($fields['regularFields'] as $k => $v) {
+                    if (isset($v['searchable'])) {
+                        $concatExpr .= ", IFNULL({$this->table}.{$k}, '-')";
                     }
                 }
-//                p($tmp);
-//                p($fields['regularFields']);
-//                $qr->whereRaw("LOCATE( '{$params['searchText']}', concat({$tmp}) )");
-//                $qr->whereRaw(" concat({$tmp}) like '%{$params['searchText']}%' ");
-                $whereTmps[] = " concat({$tmp}) like '%{$params['searchText']}%' ";
+                $searchWhereParts[] = ['expr' => "CONCAT({$concatExpr}) LIKE ?", 'binding' => "%{$safeSearch}%"];
             }
 
-
-            /// main search into all meta data
-            if($this->metaTable){
-                $qr -> leftJoin($this->metaTable, function($join) use ($translate){
-                    $join -> on("{$this->metaTable}.table_id", '=', $this -> table . '.id') -> where("{$this->metaTable}.table", $this->table)->whereIn("{$this->metaTable}.lan", [$translate, 'xx']);
+            // Include all meta values for the current language in the search scope
+            if ($this->metaTable) {
+                $qr->leftJoin($this->metaTable, function ($join) use ($translate) {
+                    $join->on("{$this->metaTable}.table_id", '=', $this->table . '.id')
+                        ->where("{$this->metaTable}.table", $this->table)
+                        ->whereIn("{$this->metaTable}.lan", [$translate, 'xx']);
                 });
-
-                $whereTmps[] = " {$this->metaTable}.val like '%{$params['searchText']}%' ";
+                $searchWhereParts[] = ['expr' => "{$this->metaTable}.val LIKE ?", 'binding' => "%{$safeSearch}%"];
+                // Expose the matched meta value so callers can highlight the match
                 $selectPart[] = "{$this->metaTable}.val as searchVal";
             }
 
-            if(count($whereTmps)>=1){
-                $qr->whereRaw("(".implode(' or ', $whereTmps).")");
-            }
-
-        }
-
-        /// search by list filters
-        if(_cv($params, 'searchBy', 'ar') && _cv($fields, ['adminListFields'])){
-            foreach ($fields['adminListFields'] as $k=>$v){
-                /// tableKey to identify search by field
-                if(!_cv($v, ['searchable']) || !isset($v['tableKey']) || !_cv($params['searchBy'], [$v['tableKey']]) )continue;
-                if(_cv($v, ['searchType'])=='where'){
-                    $qr -> where($params['searchBy'][$v['tableKey']], $v['searchable']);
-                }else{
-                    $qr -> whereRaw("LOCATE('{$params['searchBy'][$v['tableKey']]}', {$v['searchable']})");
-                }
-            }
-        }
-
-        /// filter by regular fields
-        if(isset($fields['regularFields'])){
-
-            foreach ($fields['regularFields'] as $k=>$v){
-                if(!isset($v['dbFilter']) || !isset($params[$k]) || empty($params[$k]))continue;
-
-                if($v['dbFilter'] == 'whereIn' && isset($params[$k])){
-                    if(!is_array($params[$k]))$params[$k] = [$params[$k]];
-                    $qr -> whereIn("{$this->table}.{$k}", $params[$k]);
-
-                }elseif ($v['dbFilter'] == 'like' && isset($params[$k])){
-                    if(is_array($params[$k]))$params[$k] = implode('',$params[$k]);
-                    $qr -> where("{$this->table}.{$k}",  'like', "%{$params[$k]}%");
-
-                }elseif ($v['dbFilter'] == 'where' && isset($params[$k])){
-                    if(is_array($params[$k]))$params[$k] = implode('',$params[$k]);
-                    $qr -> where("{$this->table}.{$k}",  $params[$k]);
-
-                }elseif ($v['dbFilter'] == 'range' && isset($params[$k])){
-                    if(!is_array($params[$k]))$params[$k] = [$params[$k]];
-
-                    if(count($params[$k])>=2){
-                        $qr -> whereBetween("{$this->table}.{$k}",  $params[$k]);
-                    }else{
-                        $qr -> where("{$this->table}.{$k}",  $params[$k]);
+            // Wrap all search conditions in a single OR group
+            if (count($searchWhereParts) >= 1) {
+                $qr->where(function ($q) use ($searchWhereParts) {
+                    foreach ($searchWhereParts as $i => $part) {
+                        if ($i === 0) {
+                            $q->whereRaw($part['expr'], [$part['binding']]);
+                        } else {
+                            $q->orWhereRaw($part['expr'], [$part['binding']]);
+                        }
                     }
-                }elseif ($v['dbFilter'] == '>' && isset($params[$k])){
-                    if(is_array($params[$k]))$params[$k] = implode('',$params[$k]);
-                    $qr -> where("{$this->table}.{$k}", '>', $params[$k]);
-                }elseif ($v['dbFilter'] == '<' && isset($params[$k])){
-                    if(is_array($params[$k]))$params[$k] = implode('',$params[$k]);
-                    $qr -> where("{$this->table}.{$k}", '<', $params[$k]);
-                }
-
+                });
             }
         }
 
+        // --- searchBy ---
+        // Per-field search on adminListFields. Supports exact WHERE match or
+        // LOCATE-based substring search. User value is bound via ? to prevent
+        // SQL injection (replaced the previous direct string interpolation).
+        if (_cv($params, 'searchBy', 'ar') && _cv($fields, ['adminListFields'])) {
+            foreach ($fields['adminListFields'] as $k => $v) {
+                if (!_cv($v, ['searchable']) || !isset($v['tableKey']) || !_cv($params['searchBy'], [$v['tableKey']])) continue;
 
-        ///// where raw parts
-        if(_cv($params, ['whereRaw'], 'ar')){
-            foreach ($params['whereRaw'] as $k=>$v){
+                if (_cv($v, ['searchType']) == 'where') {
+                    // $v['tableKey'] is a column name from config (trusted)
+                    $qr->where($params['searchBy'][$v['tableKey']], $v['searchable']);
+                } else {
+                    // $v['searchable'] is a column expression from config (trusted); user value bound via ?
+                    $qr->whereRaw("LOCATE(?, {$v['searchable']})", [$params['searchBy'][$v['tableKey']]]);
+                }
+            }
+        }
+
+        // --- regularFields filters ---
+        // Applies per-field dbFilter rules declared in fields['regularFields']
+        if (isset($fields['regularFields'])) {
+            foreach ($fields['regularFields'] as $k => $v) {
+                if (!isset($v['dbFilter']) || !isset($params[$k]) || empty($params[$k])) continue;
+
+                if ($v['dbFilter'] == 'whereIn') {
+                    if (!is_array($params[$k])) $params[$k] = [$params[$k]];
+                    $qr->whereIn("{$this->table}.{$k}", $params[$k]);
+                } elseif ($v['dbFilter'] == 'like') {
+                    if (is_array($params[$k])) $params[$k] = implode('', $params[$k]);
+                    $qr->where("{$this->table}.{$k}", 'like', "%{$params[$k]}%");
+                } elseif ($v['dbFilter'] == 'where') {
+                    if (is_array($params[$k])) $params[$k] = implode('', $params[$k]);
+                    $qr->where("{$this->table}.{$k}", $params[$k]);
+                } elseif ($v['dbFilter'] == 'range') {
+                    if (!is_array($params[$k])) $params[$k] = [$params[$k]];
+                    if (count($params[$k]) >= 2) {
+                        $qr->whereBetween("{$this->table}.{$k}", $params[$k]);
+                    } else {
+                        $qr->where("{$this->table}.{$k}", $params[$k]);
+                    }
+                } elseif ($v['dbFilter'] == '>') {
+                    if (is_array($params[$k])) $params[$k] = implode('', $params[$k]);
+                    $qr->where("{$this->table}.{$k}", '>', $params[$k]);
+                } elseif ($v['dbFilter'] == '<') {
+                    if (is_array($params[$k])) $params[$k] = implode('', $params[$k]);
+                    $qr->where("{$this->table}.{$k}", '<', $params[$k]);
+                }
+            }
+        }
+
+        // --- whereRaw (AND conditions) ---
+        if (_cv($params, ['whereRaw'], 'ar')) {
+            foreach ($params['whereRaw'] as $v) {
                 $qr->whereRaw($v);
             }
         }
 
-        ///// or where raw parts
-        if(_cv($params, ['orWhereRaw'], 'ar')){
-            $qr -> where(function($q)use($params){
-                foreach ($params['orWhereRaw'] as $k=>$v){
-                    $q -> orWhereRaw($v);
+        // --- orWhereRaw (OR conditions, grouped) ---
+        if (_cv($params, ['orWhereRaw'], 'ar')) {
+            $qr->where(function ($q) use ($params) {
+                foreach ($params['orWhereRaw'] as $v) {
+                    $q->orWhereRaw($v);
                 }
             });
         }
 
-        if (_cv($params, 'sort')) $qr -> where('sort', $params['sort']);
+        // --- exact sort column match ---
+        if (_cv($params, 'sort')) $qr->where('sort', $params['sort']);
 
+        // --- filter by columns from config-defined joined tables ---
+        // These reference the aliased tables added in STEP 7.
+        if (count($tableJoinSelectFilters) >= 1) {
+            foreach ($tableJoinSelectFilters as $k => $v) {
+                if (!isset($params[$k]) || empty($params[$k])) continue;
 
-        /// join on some table from configurations
-        foreach ($tableJoinOn as $k=>$v){
-            // dd($tableJoinOn);
-
-            if(_cv($v, 'tablePrefix')){
-                $tableName = $v['tablePrefix'];
-            } else {
-                $tableName = $v['joinTable'];
-            }
-
-            $qr->leftJoin("{$v['joinTable']} as joinedTable_{$tableName}", function($join) use ($tableName, $v, $params){
-                $join->on("joinedTable_{$tableName}.{$v['joinField']}", "=", "{$this->table}.{$v['joinOn']}");
-                if(_cv($v, 'sameStatus') === true){
-                    if (_cv($params, 'status','ar')) $join -> whereIn("joinedTable_{$tableName}.status", $params['status']);
-                }
-
-                if(_cv($v, 'whereRaw', 'ar')){
-                    foreach ($v['whereRaw'] as $vv){
-                        $join -> whereRaw($vv);
-                    }
-                }
-
-
-            });
-
-            //    $qr -> leftJoin("{$v['joinTable']} as joinedTable_{$v['joinTable']}", "joinedTable_{$v['joinTable']}.{$v['joinField']}", '=', "{$this->table}.{$v['joinOn']}");
-        }
-
-        $qr->leftJoin("modules_sitemap_relations", "modules_sitemap_relations.table_id", "{$this->table}.id");
-
-
-        /// filter by related table fields
-        if(count($tableJoinSelectFilters) >= 1){
-//p($tableJoinSelectFilters);
-            foreach ($tableJoinSelectFilters as $k=>$v){
-                if(!isset($params[$k]) || empty($params[$k]))continue;
-
-                if($v['filterType'] == 'whereIn'){
-                    if(!is_array($params[$k]))$params[$k] = [$params[$k]];
-                    $qr -> whereIn("{$v['table']}.{$v['field']}", $params[$k]);
-
-                }elseif ($v['filterType'] == 'like'){
-                    $qr -> where("{$v['table']}.{$v['field']}",  'like', "%{$params[$k]}%");
-
-                }elseif ($v['filterType'] == 'where'){
-                    $qr -> where("{$v['table']}.{$v['field']}",  $params[$k]);
-
-                }elseif ($v['filterType'] == 'range'){
-                    if(!is_array($params[$k]))$params[$k] = [$params[$k]];
-
-                    if(count($params[$k])>=2){
-                        $qr -> whereBetween("{$v['table']}.{$v['field']}",  $params[$k]);
-                    }else{
-                        $qr -> where("{$v['table']}.{$v['field']}",  $params[$k]);
+                if ($v['filterType'] == 'whereIn') {
+                    if (!is_array($params[$k])) $params[$k] = [$params[$k]];
+                    $qr->whereIn("{$v['table']}.{$v['field']}", $params[$k]);
+                } elseif ($v['filterType'] == 'like') {
+                    $qr->where("{$v['table']}.{$v['field']}", 'like', "%{$params[$k]}%");
+                } elseif ($v['filterType'] == 'where') {
+                    $qr->where("{$v['table']}.{$v['field']}", $params[$k]);
+                } elseif ($v['filterType'] == 'range') {
+                    if (!is_array($params[$k])) $params[$k] = [$params[$k]];
+                    if (count($params[$k]) >= 2) {
+                        $qr->whereBetween("{$v['table']}.{$v['field']}", $params[$k]);
+                    } else {
+                        $qr->where("{$v['table']}.{$v['field']}", $params[$k]);
                     }
                 }
             }
         }
 
-        if(_cv($params, 'customJsonFilter')){
-            foreach($params['customJsonFilter'] as $k => $column){
-                // dd($params['toFilterArray'][$k]);
-                foreach($params['toFilterArray'][$k] as $kk => $value){
-                    if($kk === 0){
+        // --- JSON column containment filter ---
+        if (_cv($params, 'customJsonFilter')) {
+            foreach ($params['customJsonFilter'] as $k => $column) {
+                foreach ($params['toFilterArray'][$k] as $kk => $value) {
+                    if ($kk === 0) {
                         $qr->whereJsonContains($column, $value);
                         continue;
                     }
@@ -447,107 +501,336 @@ class SmartTableModel extends Model
             }
         }
 
-        /// full list count
+        // =====================================================================
+        // STEP 9 — Count total matching records
+        //
+        // Executed HERE — after all WHERE conditions and filter JOINs (STEPS 5–8),
+        // but BEFORE the decorative JOINs added in STEPS 10–12 (taxonomy
+        // GROUP_CONCAT, relations subqueries, sitemap join).
+        //
+        // WHY THIS MATTERS:
+        // In the original code, the count ran after all joins were attached to
+        // $qr, forcing MySQL to execute the full decorated query just to produce
+        // a count. By counting here, the COUNT query contains only the joins
+        // that actually influence which rows are matched (filter joins), not the
+        // heavier joins that are only needed for the SELECT clause.
+        //
+        // DISTINCT is still required to collapse duplicate rows produced by
+        // the one-to-many taxonomy and meta filter JOINs added in STEPS 5–6.
+        // =====================================================================
         $listCount = $qr->count(DB::raw("DISTINCT({$this->table}.id)"));
 
+        // =====================================================================
+        // STEP 10 — Taxonomy: base JOIN for SELECT GROUP_CONCAT (after COUNT)
+        //
+        // Deferred to after the count because this join only affects what data
+        // is returned in the SELECT — not which records are matched.
+        //
+        // Joins taxonomy_relation + taxonomy tables so we can produce a
+        // JSON-like string of {id: "taxonomy_slug"} pairs for each record via
+        // GROUP_CONCAT. This string is decoded in STEP 18 via reverseArray().
+        //
+        // The per-group AND/OR filter JOINs (which DO affect matching) were
+        // already applied in STEP 6 using separate aliased joins, so there is
+        // no conflict with the "taxonomy_relation" alias used here.
+        // =====================================================================
+        if (_cv($fields, 'taxonomy', 'ar') || _cv($params, 'relate.taxonomy')) {
+            $qr->leftJoin(
+                "{$this->taxonomyRelationTable} as taxonomy_relation",
+                function ($join) {
+                    $join->on('taxonomy_relation.data_id', '=', $this->table . '.id')
+                        ->where('taxonomy_relation.table', $this->table);
+                }
+            )->leftJoin('taxonomy', 'taxonomy.id', '=', 'taxonomy_relation.taxonomy_id');
+
+            // Produces: {"1":"category_name","2":"other_category"}
+            // The GROUP BY in STEP 13 collapses multiple taxonomy rows per record.
+            // Decoded in STEP 18: reverseArray() flips it to {name: [ids]}.
+            $selectPart[] = 'CONCAT("{", GROUP_CONCAT(DISTINCT CONCAT("\"", `taxonomy`.`id`, "\":","\"", `taxonomy`.`taxonomy`, "\"")), "}") AS `taxonomy`';
+        }
+
+        // =====================================================================
+        // STEP 11 — Relations: subquery JOINs for SELECT (after COUNT)
+        //
+        // Each relation entry in fields['relations'] produces a correlated
+        // subquery that aggregates related IDs as a JSON array string "[1,2,3]".
+        //
+        // Deferred to after COUNT because these are purely additive to the
+        // SELECT clause and do not filter or constrain any rows.
+        // =====================================================================
+        if (_cv($fields, 'relations', 'ar')) {
+            foreach ($fields['relations'] as $k => $v) {
+                $qr->leftJoin(
+                    DB::raw("
+                        (SELECT {$v['id']},
+                                CONCAT(\"[\", GROUP_CONCAT(DISTINCT relation_{$v['module']}.{$v['data_id']}), \"]\") AS `relation_{$v['module']}`
+                         FROM {$v['table']} AS relation_{$v['module']}
+                         WHERE `table` = '{$v['module']}'
+                         GROUP BY {$v['id']}
+                        ) AS relation_{$v['module']}"),
+                    "relation_{$v['module']}.{$v['id']}",
+                    '=',
+                    "{$this->table}.id"
+                );
+                $selectPart[] = "relation_{$v['module']}";
+            }
+        }
+
+        // =====================================================================
+        // STEP 12 — Build remaining SELECT expressions (after COUNT)
+        //
+        // All SELECT parts that do not affect filtering or counting are assembled
+        // here: custom config fields, main table columns, caller-supplied
+        // expressions, and the optional sitemap relation ID.
+        //
+        // Sitemap join: previously always executed on every query regardless of
+        // whether the caller used relatedSitemap. Now opt-out: pass
+        // params['withSitemap'] = false to skip the join when not needed.
+        // Default behavior (join included) is preserved for all existing callers.
+        // =====================================================================
+
+        // Fields declared in config's customSelectFields
+        if (_cv($fields, ['customSelectFields'], 'ar')) {
+            foreach ($fields['customSelectFields'] as $v) {
+                $selectPart[] = $v;
+            }
+        }
+
+        // Main table: select specific fields if regularFieldsSelect is provided, otherwise SELECT *
+        $selectPart[] = _cv($params, ['regularFieldsSelect'], 'ar')
+            ? "{$this->table}." . implode(", {$this->table}.", $params['regularFieldsSelect'])
+            : "{$this->table}.*";
+
+        // Caller-supplied raw SELECT expression (e.g. computed columns, subselects)
+        if (_cv($params, 'customSelect')) {
+            $selectPart[] = $params['customSelect'];
+        }
+
+        // Sitemap join: skipped only when caller explicitly passes withSitemap = false.
+        // This allows callers that do not use relatedSitemap to avoid the join overhead.
+        if (!array_key_exists('withSitemap', $params) || $params['withSitemap'] !== false) {
+            $qr->leftJoin('modules_sitemap_relations', 'modules_sitemap_relations.table_id', "{$this->table}.id");
+            $selectPart[] = 'modules_sitemap_relations.sitemap_id as relatedSitemap';
+        }
+
+        // =====================================================================
+        // STEP 13 — GROUP BY and HAVING
+        //
+        // Default group by the primary key to collapse duplicate rows introduced
+        // by the one-to-many JOINs (taxonomy, meta filters). Override via
+        // params['group_by'] when a different grouping is needed.
+        //
+        // HAVING conditions are appended after GROUP BY. Both AND (having) and
+        // OR (orHaving) variants are supported via raw expressions.
+        // =====================================================================
         $groupBy = ["{$this->table}.id"];
-        if(_cv($params, 'group_by'))$groupBy = $params['group_by'];
-        $qr -> groupBy($groupBy);
+        if (_cv($params, 'group_by')) $groupBy = $params['group_by'];
+        $qr->groupBy($groupBy);
 
-        // having parts
-        if(_cv($params, ['having'], 'ar')){
-            foreach ($params['having'] as $k=>$v){
-                foreach($v as $vv){
-                    $qr->havingRaw($k. '=' .$vv);
+        if (_cv($params, ['having'], 'ar')) {
+            foreach ($params['having'] as $k => $v) {
+                foreach ($v as $vv) {
+                    $qr->havingRaw($k . '=' . $vv);
                 }
             }
         }
 
-        if(_cv($params, ['orHaving'], 'ar')){
-            foreach ($params['orHaving'] as $k=>$v){
-                foreach($v as $vv){
-                    $qr->orhavingRaw($k. '=' .$vv);
+        if (_cv($params, ['orHaving'], 'ar')) {
+            foreach ($params['orHaving'] as $k => $v) {
+                foreach ($v as $vv) {
+                    $qr->orHavingRaw($k . '=' . $vv);
                 }
             }
         }
 
+        // =====================================================================
+        // STEP 14 — Pagination (LIMIT / OFFSET)
+        //
+        // Default page size is 10 when no limit is specified.
+        // When both 'page' and 'limit' are provided, SKIP drives offset-based
+        // pagination. For very large datasets with deep page numbers, consider
+        // cursor-based pagination via a custom whereRaw + after_id approach.
+        // =====================================================================
         $params['limit'] = $params['limit'] ?? 10;
 
-        if (_cv($params, 'limit')) $qr -> take($params['limit']);
-        if (_cv($params, 'page')) $qr -> skip(($params['page'] - 1) * $params['limit']) -> take($params['limit']);
+        if (_cv($params, 'limit')) $qr->take($params['limit']);
+        if (_cv($params, 'page'))  $qr->skip(($params['page'] - 1) * $params['limit'])->take($params['limit']);
 
-        $defaultOrderField = _cv($fields, 'orderField')?$fields['orderField']:'id';
-        $defaultOrderDirection = _cv($fields, 'orderDirection')?$fields['orderDirection']:'desc';
+        // =====================================================================
+        // STEP 15 — Ordering
+        //
+        // Order field is whitelisted against fields declared in regularFields
+        // and fields (meta field configs), plus a set of safe built-in columns.
+        // This prevents SQL injection via the orderField param — previously the
+        // param value was interpolated directly into orderByRaw() with no check.
+        //
+        // orderDirection is whitelisted to ASC, DESC, or RANDOM.
+        //
+        // Special cases:
+        //   RANDOM    → ORDER BY RAND() (shuffled result set)
+        //   orderCast → CONVERT(field, SIGNED) for correct numeric-string sorting
+        //               when a column stores numbers as VARCHAR/TEXT
+        // =====================================================================
+        $defaultOrderField     = _cv($fields, 'orderField')     ? $fields['orderField']     : 'id';
+        $defaultOrderDirection = _cv($fields, 'orderDirection') ? $fields['orderDirection'] : 'desc';
 
-        $orderField = _cv($params, 'orderField')?$params['orderField']:$defaultOrderField;
-        $orderDirection = _cv($params, 'orderDirection')?$params['orderDirection']:$defaultOrderDirection;
+        $orderField     = _cv($params, 'orderField')     ? $params['orderField']     : $defaultOrderField;
+        $orderDirection = _cv($params, 'orderDirection') ? $params['orderDirection'] : $defaultOrderDirection;
 
+        // Whitelist orderField: only allow columns declared in field configs or safe defaults
+        $allowedOrderFields = array_merge(
+            array_keys($fields['regularFields'] ?? []),
+            array_keys($fields['fields']        ?? []),
+            ['id', 'sort', 'created_at', 'updated_at']
+        );
+        if (!in_array($orderField, $allowedOrderFields)) $orderField = $defaultOrderField;
 
+        // Whitelist orderDirection to prevent injection via raw interpolation
+        if (!in_array(strtoupper($orderDirection), ['ASC', 'DESC', 'RANDOM'])) {
+            $orderDirection = $defaultOrderDirection;
+        }
 
-        if($enableOrdering){
-            if($orderDirection == 'RANDOM'){
-                $qr->orderByRaw("RAND()");
-            }
-            else if(_cv($fields, ['regularFields', $orderField, 'orderCast']) || _cv($fields, ['fields', $orderField, 'orderCast'])){
-                if($orderField) $orderField = $this->table .'.'. $orderField;
-                $qr->orderByRaw("CONVERT({$orderField}, SIGNED) {$orderDirection}");
+        if ($enableOrdering) {
+            if (strtoupper($orderDirection) === 'RANDOM') {
+                // Full random shuffle — note: ORDER BY RAND() is slow on large tables
+                $qr->orderByRaw('RAND()');
+            } elseif (
+                _cv($fields, ['regularFields', $orderField, 'orderCast']) ||
+                _cv($fields, ['fields',        $orderField, 'orderCast'])
+            ) {
+                // Numeric-string column: cast to SIGNED so "10" sorts after "9"
+                $qr->orderByRaw("CONVERT({$this->table}.{$orderField}, SIGNED) {$orderDirection}");
             } else {
                 $qr->orderByRaw("{$orderField} {$orderDirection}");
             }
-
         }
 
-        $qStr = implode(',', $selectPart);
-        $qr->selectRaw(DB::raw($qStr));
-
-        $list = $qr -> get();
-
-//        if(_cv($params, 'searchBy', 'ar'))
-// p(DB::getQueryLog());
-
+        // =====================================================================
+        // STEP 16 — Execute main query
+        // =====================================================================
+        $qr->selectRaw(DB::raw(implode(',', $selectPart)));
+        $list = $qr->get();
 
         if (!$list) return $returnData;
 
         $ret = _psql(_toArray($list));
-//        p($ret);
 
+        // =====================================================================
+        // STEP 17 — Load meta data via a dedicated secondary query
+        //
+        // REPLACES the GROUP_CONCAT subquery approach from the original code.
+        //
+        // Original approach:
+        //   A subquery embedded in the main FROM/JOIN packed every meta row
+        //   into one string per record using a custom separator pattern:
+        //     "key----SEP----val----SEP----lan----END----key2..."
+        //   PHP then unpacked these via decodeJoinedMetaData().
+        //
+        // Problems with GROUP_CONCAT approach:
+        //   — Added a correlated subquery to every getList call even when no
+        //     meta data was ultimately needed
+        //   — GROUP_CONCAT has a server-side max length (group_concat_max_len)
+        //     that silently truncates data on wide meta tables
+        //   — String packing/unpacking (explode on custom separators) is fragile
+        //     and slower than native PHP array operations
+        //   — Inflated the main query size, increasing query plan complexity
+        //
+        // New approach (2-query pattern):
+        //   1. Collect the IDs returned by the main query
+        //   2. Run a single flat SELECT on the meta table: WHERE table_id IN(ids)
+        //   3. Group meta rows in PHP by [table_id][lan][key] = decoded_value
+        //   4. Merge into each row in STEP 18 — output structure is identical
+        //      to what decodeJoinedMetaData($str, 1) + mergeToMetaData() produced
+        //
+        // Benefits:
+        //   — Main query no longer carries any GROUP_CONCAT subquery overhead
+        //   — Meta query uses the (table, table_id) index with a clean IN() clause
+        //   — No string packing/unpacking; PHP groupBy is O(n)
+        //   — meta_keys restriction is applied directly as a SQL WHERE IN clause
+        //     rather than being filtered post-decode in PHP
+        //   — No silent data truncation risk
+        // =====================================================================
+        $metaByRow = [];
+
+        if ($this->metaTable && count($ret) > 0) {
+            $ids = array_column($ret, 'id');
+
+            $metaQr = DB::table($this->metaTable)
+                ->whereIn('table_id', $ids)
+                ->where('table', $this->table)
+                ->select(['table_id', 'key', 'val', 'lan']);
+
+            // When meta_keys is specified, restrict to only those keys in SQL
+            // (avoids loading and discarding unwanted meta rows in PHP)
+            $metaKeysFilter = _cv($params, 'meta_keys', 'ar');
+            if (is_array($metaKeysFilter)) {
+                $metaQr->whereIn('key', $metaKeysFilter);
+            }
+
+            // Build: [table_id][lan][key] = value
+            // This matches the structure that decodeJoinedMetaData($str, 1) returned:
+            //   ['ge' => ['title' => '...', 'body' => '...'], 'xx' => ['price' => '...']]
+            foreach ($metaQr->get() as $metaRow) {
+                $decoded = json_decode($metaRow->val, true);
+                $metaByRow[$metaRow->table_id][$metaRow->lan][$metaRow->key] = is_array($decoded) ? $decoded : $metaRow->val;
+            }
+        }
+
+        // =====================================================================
+        // STEP 18 — Post-process each result row
+        //
+        // Four sequential transformations per row:
+        //
+        //   1. Meta merge: attach meta data from STEP 17 via mergeToMetaData().
+        //      allAttributes ensures main-table column values take priority over
+        //      any identically-named meta keys.
+        //
+        //   2. Taxonomy decode: the GROUP_CONCAT result is a JSON-like string;
+        //      _psqlRow() (called inside _psql on $list) may have already decoded
+        //      it to an array. reverseArray() flips {id: "name"} → {name: [ids]}.
+        //
+        //   3. Translation flatten: when params['translate'] is set,
+        //      extractOnlyTranslated() collapses locale-keyed sub-arrays
+        //      (e.g. 'ge', 'en', 'xx') into a single flat array for the
+        //      requested language, adding 'localisedto' to the row.
+        //
+        //   4. Field whitelist: when params['fields'] is set, only the listed
+        //      keys are kept in the output row.
+        // =====================================================================
         $metaFields = _cv($fields, 'fields');
 
-        foreach ($ret as $k => $v)
-        {
+        foreach ($ret as $k => $v) {
 
-            if(isset($v['metas'])){
-                $meta = decodeJoinedMetaData($v['metas'], 1);
-                unset($v['metas']);
-                $ret[$k] = mergeToMetaData($v, $meta, $this -> allAttributes);
+            // 1. Merge meta data (replaces old metas GROUP_CONCAT decode)
+            if ($this->metaTable) {
+                $rowMeta = $metaByRow[$v['id']] ?? [];
+                $ret[$k] = mergeToMetaData($v, $rowMeta, $this->allAttributes);
             }
 
-            if(isset($v['taxonomy'])){
-                $ret[$k]['taxonomy'] = $this -> reverseArray($v['taxonomy']);
+            // 2. Decode taxonomy GROUP_CONCAT string into structured array
+            if (isset($v['taxonomy'])) {
+                $ret[$k]['taxonomy'] = $this->reverseArray($v['taxonomy']);
             }
 
-            if(_cv($params, 'translate')){
+            // 3. Flatten locale-keyed meta into a single-level array
+            if (_cv($params, 'translate')) {
                 $ret[$k] = $this->extractOnlyTranslated($ret[$k], $translate, $metaFields);
             }
 
-            /// leave only desired fields
-            if(_cv($params, 'fields', 'ar')){
+            // 4. Restrict output to caller-specified field whitelist
+            if (_cv($params, 'fields', 'ar')) {
                 $tmp = [];
-                foreach ($params['fields'] as $kk=>$vv){
-                    $tmp[$vv] = isset($ret[$k][$vv])?$ret[$k][$vv]:'';
+                foreach ($params['fields'] as $vv) {
+                    $tmp[$vv] = $ret[$k][$vv] ?? '';
                 }
-
                 $ret[$k] = $tmp;
             }
-
         }
 
-
         $returnData['listCount'] = $listCount;
-        $returnData['list'] = $ret;
-        $returnData['page'] = _cv($params, 'page', 'nn')?$params['page']:1;
+        $returnData['list']      = $ret;
+        $returnData['page']      = _cv($params, 'page', 'nn') ? $params['page'] : 1;
 
-//p($returnData);
         return $returnData;
     }
 
