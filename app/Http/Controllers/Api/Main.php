@@ -51,57 +51,81 @@ class Main extends App\Http\Controllers\Api\ApiController
      */
 
 
-    public function index(){
+    public function index()
+    {
         $request = Request();
+        $locale  = requestLan();
 
-        DB::enableQueryLog();
-        $start = microtime(true);
+        // One cache entry per locale — never keyed by qr
+        $cacheKey = 'apiIndx_' . $locale;
+        $payload  = Cache::store('file')->get($cacheKey);
 
-        $options = new OptionsModel();
-        $menuItem = new SiteMapModel();
-        $content = new PageModel();
-        // $widgets = new Widgets();
-        // $forms = new App\Models\Admin\FormBuilderModel();
-        // $shopSiteMain = new Shop\ShopSiteMain();
+        if (!$payload) {
+            $payload = $this->buildIndexPayload($locale);
+            Cache::put($cacheKey, $payload, env('CACHE_INDX', 2));
+        }
 
+        // Injected after cache retrieval so it always reflects actual server time
+        $payload['server_time'] = date('D M d Y H:i:s O');
 
-        $ret['locale'] = requestLan(); //config('app.locale');
-        $cacheKey = is_array($request->qr)?'apiIndx_'.$ret['locale'].'_'.md5(json_encode($request->qr)):'apiIndx_'.$ret['locale'];
+        // GraphQL-like field selection applied after cache — never pollutes cache keys
+        $response = apiShortener($payload, $request->qr);
 
-        /// get from cache
-        $value = Cache::store('file')->get($cacheKey);
-        if($value) return $value;
+        return response()->json($response, 200, [], JSON_UNESCAPED_UNICODE);
+    }
 
-        $ret['server_time'] = date('D M d Y H:i:s O');
+    private function buildIndexPayload(string $locale): array
+    {
+        $menuModel = new SiteMapModel();
+        $content   = new PageModel();
 
-        $ret['siteMenus'] = config('adminpanel.site_menus');
-        $ret['locales'] = config('app.locales');
-        $ret['sitePlaceHolders'] = config('app.sitePlaceHolders');
-       $ret['contentTypes'] = $content->getContentTypes(['exclude'=>['title', 'route', 'slug_field', 'searchable', 'taxonomy', 'fields', 'orderBy', 'relation']]);
+        // Single query replaces three separate OptionsModel calls
+        $optionRows = OptionsModel::select(['key', 'value', 'content_group'])
+            ->where(function ($q) {
+                $q->where('content_group', 'site_configurations')
+                  ->orWhere('content_group', 'general');
+            })
+            ->get();
 
-//        $ret['taxonomy'] = config('adminpanel.taxonomy');
-        $ret['menus'] = $menuItem->generateMenuForSite();
-        $ret['thinMenu'] = $menuItem->thinMenu($ret['menus'], $fields=['id'=>'id', 'title'=>"titles.{$ret['locale']}.title", 'pid'=>'pid', 'url'=>'fullUrls.fullUrlRelated', 'configs'=>'configs', 'menu_type'=>'menu_type']);
+        $siteSettings = [];
+        $cookies      = null;
+        $xrates       = null;
 
-//        $ret['widgets'] = $widgets->getWidgetsForSite(['locale'=>$ret['locale']]);
-        $ret['static'] = config('filesystems.disks.public.url');
-        $ret['siteSettings'] = $options->getKeyValListBy(['content_group'=>'site_configurations'] );
+        foreach ($optionRows as $row) {
+            $val = _cv(_psqlRow(_toArray($row)), 'value');
+            if ($row->content_group === 'site_configurations') {
+                $siteSettings[$row->key] = $val;
+                if ($row->key === 'xrates') $xrates = $val;
+            } elseif ($row->key === 'thirdPartyScripts') {
+                $cookies = _cv($val, ['description', $locale]);
+            }
+        }
 
-        $ret['smartLayouts'] = config('adminpanel.smartLayouts');
+        $menus = $menuModel->generateMenuForSite();
 
-        $cookies = $options->getSetting( 'thirdPartyScripts', 'general' );
-        $ret['cookies'] = _cv($cookies, ['description', $ret['locale']]);
-
-//        p(DB::getQueryLog());
-        $ret['exectime'] = microtime(true) - $start;
-        $ret = apiShortener($ret, $request->qr);
-
-        $ret['xrates'] = $options->getSetting('xrates');
-
-        Cache::put($cacheKey, response()->json($ret, 200, [], JSON_UNESCAPED_UNICODE), env('CACHE_INDX', 2));
-//        p($ret);
-
-        return response()->json($ret, 200, [], JSON_UNESCAPED_UNICODE);
+        return [
+            'locale'           => $locale,
+            'locales'          => config('app.locales'),
+            'siteMenus'        => config('adminpanel.site_menus'),
+            'sitePlaceHolders' => config('app.sitePlaceHolders'),
+            'static'           => config('filesystems.disks.public.url'),
+            'smartLayouts'     => config('adminpanel.smartLayouts'),
+            'contentTypes'     => $content->getContentTypes([
+                'exclude' => ['title', 'route', 'slug_field', 'searchable', 'taxonomy', 'fields', 'orderBy', 'relation'],
+            ]),
+            'menus'            => $menus,
+            'thinMenu'         => $menuModel->thinMenu($menus, [
+                'id'        => 'id',
+                'title'     => "titles.{$locale}.title",
+                'pid'       => 'pid',
+                'url'       => 'fullUrls.fullUrlRelated',
+                'configs'   => 'configs',
+                'menu_type' => 'menu_type',
+            ]),
+            'siteSettings'     => $siteSettings,
+            'cookies'          => $cookies,
+            'xrates'           => $xrates,
+        ];
     }
 
     /**
