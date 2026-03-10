@@ -1,0 +1,123 @@
+.nav-menu li a.router-link-exact-active{
+  color: white;
+  text-decoration: none;
+  background-color: rgba(0, 0, 0, 0.1);
+}
+
+.bg-hover-gray:hover,
+.bg-focus-gray:focus {
+  background-color: #f1f1f1;
+}
+
+.fixedHeightelSelect .el-select{ max-height: 32px; overflow: hidden; }
+.fixedHeightelSelect .el-select .el-tag{ max-width: 55%; overflow: hidden; min-width: 46px; }
+.fixedHeightelSelect .el-select .el-tag .el-select__tags-text{ max-width: 80%; float: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.fixedHeightelSelect .el-select .el-select__input{ position: absolute; }
+.actionsCell{ width: 1%; }
+
+.modal-xxl, .modal-xxxl, .modal-xxxxl{ max-width: 100%; width: 100%; }
+
+@media (min-width: 992px) {
+  .modal-xxl{ max-width: 70%; }
+  .modal-xxxl{ max-width: 80%; }
+  .modal-xxxxl{ max-width: 88%; }
+}
+
+.layer-2{ padding-left: 2%; }
+.layer-3{ padding-left: 4%; }
+.layer-4{ padding-left: 6%; }
+.layer-5{ padding-left: 8%; }
+
+.hoverShadow{ transition: box-shadow 0.2s ease-in-out; }
+.hoverShadow:hover{
+  box-shadow: 1px 1px 48px 8px rgba(13,5,89,0.67);
+  -webkit-box-shadow: 1px 1px 48px 8px rgba(13,5,89,0.67);
+  -moz-box-shadow: 1px 1px 48px 8px rgba(13,5,89,0.67);
+}
+
+.right-angle{
+  transform: rotate(90deg);
+  transform-origin: bottom left;
+
+}
+
+.width100{ width: 100px; }
+.width110{ width: 110px; }
+.width120{ width: 120px; }
+.width130{ width: 130px; }
+.width140{ width: 140px; }
+.width150{ width: 150px; }
+.width160{ width: 160px; }
+.width170{ width: 170px; }
+.width180{ width: 180px; }
+.width190{ width: 190px; }
+.width200{ width: 200px; }
+
+.closeRightAbsolute{ position: absolute; right: 7px; top: -8px; padding: 10px; z-index: 5; }
+.closeRightAbsolute2{ position: absolute; right: 30px; top: 30px; padding: 10px; z-index: 5; }
+
+.flipBtn{ overflow: hidden; white-Space: nowrap; text-overflow: ellipsis; transition: width 600ms; }
+.flipBtn.active, .flipBtn:hover { overflow: visible; transition: width 600ms; }
+
+.text-shaddow-1{ text-shadow: #ccc 1px 1px 3px; }
+.text-shaddow-2{ text-shadow: #ccc 2px 2px 3px; }
+
+
+.modal, .glass-morphism{
+  background: rgba(79, 96, 119, 0.25);
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(1.4px);
+  -webkit-backdrop-filter: blur(1.4px);
+}
+/*.modal-content{ background: none; }*/
+/*.modal-dialog, .modal-content{*/
+/*  backdrop-filter: blur(16px) saturate(180%);*/
+/*  -webkit-backdrop-filter: blur(16px) saturate(180%);*/
+/*  background-color: rgba(255, 255, 255, 0.20);*/
+/*}*/
+
+.scrollerModalPart{ overflow-y: auto; max-height: 300px;}
+.el-message{ z-index: 4040 !important; }
+.page-sidebar{ z-index: 1000; }
+
+
+/** draggable selector */
+.el-tag {
+  position: relative;
+}
+
+.el-tag::before {
+  content: "";
+  width: 1px;
+  height: 15px;
+  background-color: #0e1111;
+  position: absolute;
+  right: calc(100% + 3.5px);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.el-tag::after {
+  content: "";
+  width: 1px;
+  height: 15px;
+  background-color: #0e1111;
+  position: absolute;
+  left: calc(100% + 3px);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.el-tag.dragging {
+  filter: brightness(0.9);
+  background-color: rgb(244, 244, 245, 0.75) !important;
+}
+
+.el-tag.dragover::before, .el-tag.dragover::after {
+  opacity: 1;
+}
+/** END draggable selector */
+
+.border-bottom-danger {
+  border-bottom-color: #dc3545; /* Bootstrap's danger red */
+}

@@ -1,0 +1,21 @@
+stages:
+  - build
+  - deploy
+
+clean on dev:
+  stage: deploy
+  script:
+#    - lftp -c "debug; open -u devops,144144144 gcapital-app.connect.ge; rm -r /gcapital-app.connect.ge/public/connectadmin/assets/; bye"
+#    - lftp -c "debug; open -u devops,144144144 gcapital-app.connect.ge; rm -r /gcapital-app.connect.ge/public/assets/; bye"
+#
+#deploy on dev:
+#  stage: deploy
+#  script:
+#    - cd runners/
+#    - cd ../
+#    - git submodule update --init
+#    - git submodule foreach git pull origin master
+#    - chmod +x runners/deploy-dev.js
+#    - ./runners/deploy-dev.js gcapital-app gcapital-app.connect.ge 21 devops 144144144
+#  only:
+#    - master
