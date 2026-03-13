@@ -186,10 +186,8 @@ $confs = [
     ],
 
     'site_menus' => [
-        'main' => [],
-        'footer' => [],
-        //        'footer_large' => [],
-        //        'investors' => [],
+        'main'      => [],  /// Header nav: Home, About Us, Services, Branches, Blog, FAQ, Contacts, Corporate Offers
+        'footer'    => [],  /// Footer site links column
     ],
 
     'cookies' => [
@@ -281,10 +279,8 @@ $confs = [
     /// online form aggregator settings /// aggregator class do some custom actions to specific form data (f.e. )
     /// 'online form slug'=>['aggregatorClass'=>FormAggregators/'classname', 'perPage'=>50,  ]
     'onlineForms' => [
-        //        'contact-form' => ['function' => 'contactForm', 'perPage' => 50, 'toMails' => "", 'disableSave' => true,],
-        //        'contact-form-contact-us' => ['function' => 'contactForm', 'perPage' => 50, 'toMails' => "", 'disableSave' => true,],
+        'contact-form' => ['perPage' => 50, 'disableSave' => false, 'toMails' => ''],
         'subscribeForm' => ['perPage' => 50, 'disableSave' => false, 'validate' => ['unique' => 'email']],
-        //    'sendVacancy' => ['function' => 'sendVacancy', 'perPage' => 50, 'disableSave' => true,],
     ],
 
     //////////////////////////////////
@@ -398,359 +394,208 @@ $confs = [
                 ],
             ]
         ],
-        'news' => [
-            'title' => 'News',
+        // ── GeoCar content types ─────────────────────────────────────────────
+
+        /// Hero carousel slides (HeroCarousel component)
+        /// Re-uses existing 'banner' type — add items with image + optional url.
+        /// Listed here as reference only; no separate type needed.
+
+        /// Services page + ServicesSection on home
+        'service' => [
+            'title' => 'Services',
             'route' => 'contentManagement',
             'slug_field' => 'title',
             'searchable' => 1,
-            'taxonomy' => ['timeline_year'],
+            'taxonomy' => ['service_category'],
             'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'teaser' => ['title' => 'Teaser', 'type' => 'textarea', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'image' => ['title' => 'Image', 'type' => 'image', 'translate' => 1, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'limit' => 1, 'size' => 5],
-                'banner_image' => ['title' => 'Banner Image', 'type' => 'image', 'translate' => 1, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'limit' => 1, 'size' => 5],
-                'content' => [
-                    'title' => 'Content',
-                    'type' => 'multifield2',
-                    'translate' => 0,
-                    'required' => 0,
-                    'showOnAdminList' => 0,
-                    'useForSeo' => 0,
+                'title'       => ['title' => 'Title',             'type' => 'text',     'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
+                'teaser'      => ['title' => 'Short Description', 'type' => 'textarea', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
+                'image'       => ['title' => 'Image',             'type' => 'image',    'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 0, 'limit' => 1, 'size' => 5],
+                'is_featured' => ['title' => 'Featured (large card on home)', 'type' => 'checkbox', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0, 'values' => ['1' => 'Yes']],
+                'content'     => [
+                    'title' => 'Full Description', 'type' => 'multifield2', 'translate' => 1,
+                    'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0,
                     'childs' => [
-                        'editor' => ['type' => 'editor', 'title' => 'Editor', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'editableTitle' => 1],
-                        'image' => ['type' => 'image', 'title' => 'Image', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'size' => 5, 'editableTitle' => 1],
-                        'file' => ['type' => 'file', 'title' => 'File', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'limit' => 1, 'size' => 10, 'editableTitle' => 1],
-                        'youtube_video' => ['type' => 'url', 'title' => 'YouTube Video', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'editableTitle' => 1],
+                        'editor' => ['type' => 'editor', 'title' => 'Editor', 'translate' => 1, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'editableTitle' => 1],
+                        'image'  => ['type' => 'image',  'title' => 'Image',  'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'size' => 5, 'editableTitle' => 1],
                     ],
-
-                ]
-            ]
+                ],
+            ],
         ],
 
-        'credit_ratings' => [
-            'title' => 'Credit Ratings',
+        /// Blog list + single post
+        'blog' => [
+            'title' => 'Blog',
+            'route' => 'contentManagement',
+            'slug_field' => 'title',
+            'searchable' => 1,
+            'taxonomy' => ['blog_category'],
+            'fields' => [
+                'title'  => ['title' => 'Title',       'type' => 'text',     'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
+                'teaser' => ['title' => 'Teaser',      'type' => 'textarea', 'translate' => 1, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 1],
+                'image'  => ['title' => 'Cover Image', 'type' => 'image',    'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0, 'limit' => 1, 'size' => 5],
+                'author' => ['title' => 'Author',      'type' => 'text',     'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'content' => [
+                    'title' => 'Content', 'type' => 'multifield2', 'translate' => 1,
+                    'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0,
+                    'childs' => [
+                        'editor'        => ['type' => 'editor', 'title' => 'Editor',        'translate' => 1, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'editableTitle' => 1],
+                        'image'         => ['type' => 'image',  'title' => 'Image',         'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'size' => 5, 'editableTitle' => 1],
+                        'youtube_video' => ['type' => 'url',    'title' => 'YouTube Video', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'editableTitle' => 1],
+                    ],
+                ],
+            ],
+        ],
+
+        /// FAQ page — accordion items grouped by faq_category taxonomy tabs
+        'faq' => [
+            'title' => 'FAQ',
+            'route' => 'contentManagement',
+            'slug_field' => 'title',
+            'searchable' => 1,
+            'taxonomy' => ['faq_category'],
+            'fields' => [
+                'title'   => ['title' => 'Question', 'type' => 'text',   'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
+                'content' => ['title' => 'Answer',   'type' => 'editor', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 0, 'useForSeo' => 0],
+            ],
+        ],
+
+        /// Branches page — map pins + branch detail cards
+        /// address, week hours, saturday hours, lat/lng for Google Maps embed
+        'branch' => [
+            'title' => 'Branches',
+            'route' => 'contentManagement',
+            'slug_field' => 'title',
+            'searchable' => 0,
+            'taxonomy' => ['branch_city'],
+            'fields' => [
+                'title'              => ['title' => 'Branch Name',        'type' => 'text',  'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'address'            => ['title' => 'Address',            'type' => 'text',  'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'working_hours_week' => ['title' => 'Working Hours (Week)', 'type' => 'text','translate' => 1, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'working_hours_sat'  => ['title' => 'Working Hours (Saturday)', 'type' => 'text', 'translate' => 1, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'lat'                => ['title' => 'Latitude',           'type' => 'text',  'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0],
+                'lng'                => ['title' => 'Longitude',          'type' => 'text',  'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0],
+                'image'              => ['title' => 'Branch Photo',       'type' => 'image', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'limit' => 1, 'size' => 5],
+            ],
+        ],
+
+        /// Partners section — logo grid (PartnersSection component)
+        'partner' => [
+            'title' => 'Partners',
             'route' => 'contentManagement',
             'slug_field' => 'title',
             'searchable' => 0,
             'taxonomy' => [],
             'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'content' => [
-                    'title' => 'Content',
-                    'type' => 'multifield2',
-                    'translate' => 0,
-                    'required' => 0,
-                    'showOnAdminList' => 1,
-                    'useForSeo' => 0,
+                'title' => ['title' => 'Company Name', 'type' => 'text',  'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'image' => ['title' => 'Logo',         'type' => 'image', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 0, 'limit' => 1, 'size' => 2],
+                'url'   => ['title' => 'Website URL',  'type' => 'url',   'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0],
+            ],
+        ],
+
+        /// "Quick and Convenient" feature list (QuickConvenient component)
+        /// icon + title + description; is_highlighted controls blue title colour
+        'app_feature' => [
+            'title' => 'App Features',
+            'route' => 'contentManagement',
+            'slug_field' => 'title',
+            'searchable' => 0,
+            'taxonomy' => [],
+            'fields' => [
+                'title'          => ['title' => 'Title',       'type' => 'text',  'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'teaser'         => ['title' => 'Description', 'type' => 'textarea', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'icon'           => ['title' => 'Icon (SVG)',  'type' => 'image', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0, 'limit' => 1, 'size' => 1],
+                'is_highlighted' => ['title' => 'Highlighted (blue title + border)', 'type' => 'checkbox', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0, 'values' => ['1' => 'Yes']],
+            ],
+        ],
+
+        /// "Premium Features of Our App" cards (PremiumFeatures component)
+        /// photo + title + description + CTA link
+        'premium_feature' => [
+            'title' => 'Premium Features',
+            'route' => 'contentManagement',
+            'slug_field' => 'title',
+            'searchable' => 0,
+            'taxonomy' => [],
+            'fields' => [
+                'title'     => ['title' => 'Title',           'type' => 'text',     'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'teaser'    => ['title' => 'Description',     'type' => 'textarea', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'image'     => ['title' => 'Card Image',      'type' => 'image',    'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 0, 'limit' => 1, 'size' => 5],
+                'cta_label' => ['title' => 'CTA Button Label','type' => 'text',     'translate' => 1, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0],
+                'cta_url'   => ['title' => 'CTA Button URL',  'type' => 'url',      'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0],
+            ],
+        ],
+
+        /// Corporate Offers — highlighted nav link, dedicated page
+        'corporate_offer' => [
+            'title' => 'Corporate Offers',
+            'route' => 'contentManagement',
+            'slug_field' => 'title',
+            'searchable' => 1,
+            'taxonomy' => ['offer_category'],
+            'fields' => [
+                'title'     => ['title' => 'Title',             'type' => 'text',     'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
+                'teaser'    => ['title' => 'Short Description', 'type' => 'textarea', 'translate' => 1, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 1],
+                'image'     => ['title' => 'Image',             'type' => 'image',    'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0, 'limit' => 1, 'size' => 5],
+                'valid_from'=> ['title' => 'Valid From (date)', 'type' => 'text',     'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'valid_to'  => ['title' => 'Valid To (date)',   'type' => 'text',     'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0],
+                'cta_label' => ['title' => 'CTA Button Label',  'type' => 'text',     'translate' => 1, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0],
+                'cta_url'   => ['title' => 'CTA Button URL',    'type' => 'url',      'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0],
+                'content'   => [
+                    'title' => 'Content', 'type' => 'multifield2', 'translate' => 1,
+                    'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0,
                     'childs' => [
-                        'text' => ['type' => 'text', 'title' => 'Text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'editableTitle' => 1],
-                        'image' => ['type' => 'image', 'title' => 'Image', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'size' => 5, 'editableTitle' => 1],
-                        'file' => ['type' => 'file', 'title' => 'File', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'limit' => 1, 'size' => 20, 'editableTitle' => 1]
-                    ],
-
-                ]
-            ]
-        ],
-
-        'investment_faq' => [
-            'title' => 'Investment FAQ',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => [],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'content' => [
-                    'title' => 'Content',
-                    'type' => 'multifield2',
-                    'translate' => 0,
-                    'required' => 0,
-                    'showOnAdminList' => 0,
-                    'useForSeo' => 0,
-                    'childs' => [
-                        'editor' => ['type' => 'editor', 'title' => 'Editor', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0]
-                    ],
-
-                ]
-            ]
-        ],
-
-        'investment_strategy' => [
-            'title' => 'Investment Strategy',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => [],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'content' => [
-                    'title' => 'Content',
-                    'type' => 'multifield2',
-                    'translate' => 0,
-                    'required' => 0,
-                    'showOnAdminList' => 0,
-                    'useForSeo' => 0,
-                    'childs' => [
-                        'editor' => ['type' => 'editor', 'title' => 'Editor', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0],
-                        'image' => ['type' => 'image', 'title' => 'Image', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'size' => 5],
-                        'text' => ['type' => 'text', 'title' => 'Text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0]
-                    ],
-                ]
-            ]
-        ],
-
-        'shareholder_meetings' => [
-            'title' => 'Shareholder Meetings',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => ['timeline_year'],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'content' => [
-                    'title' => 'Content',
-                    'type' => 'multifield2',
-                    'translate' => 0,
-                    'required' => 0,
-                    'showOnAdminList' => 0,
-                    'useForSeo' => 0,
-                    'childs' => [
-                        'editor' => ['type' => 'editor', 'title' => 'Editor', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0],
-                        'file' => ['type' => 'file', 'title' => 'File', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'limit' => 20, 'size' => 20]
-                    ],
-                ]
-            ]
-        ],
-
-        'portfolio_company' => [
-            'title' => 'Portfolio Company',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => ['portfolio_category'],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'image' => ['title' => 'Image', 'type' => 'image', 'translate' => 1, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0, 'limit' => 1, 'size' => 5],
-                'company_website' => ['title' => 'Company Website', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'company_status' => ['title' => 'Status', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'sector' => ['title' => 'Sector', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'year_of_investment' => ['title' => 'Year of Investment', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                //                'tooltip' => ['type' => 'tooltip', 'title' => 'Tooltip', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'editableTitle' => 1, 'values' => ['title' => 'Title', 'label' => 'Label']],
-                'content' => ['type' => 'tooltip', 'title' => 'Content', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'editableTitle' => 1, 'values' => ['title' => 'Title', 'label' => 'Label', 'value' => 'Value']],
-                'editor' => ['title' => 'Editor', 'type' => 'editor', 'translate' => 1, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0]
-            ]
-        ],
-
-        'governance' => [
-            'title' => 'Governance',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => [],
-            'fields' => [
-                'title' => ['title' => 'Full Name', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'teaser' => ['title' => 'Position', 'type' => 'text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0],
-                'image' => ['title' => 'Image', 'type' => 'image', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'limit' => 1, 'size' => 5],
-                'content' => ['title' => 'Content', 'type' => 'editor', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0],
-                'linkedin' => ['title' => 'LinkedIn', 'type' => 'text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0],
-                'soc_x' => ['title' => 'Soc. X', 'type' => 'text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0],
-                'mail' => ['title' => 'Email', 'type' => 'text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0],
-            ]
-        ],
-
-        'history' => [
-            'title' => 'History',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => ['history_category', 'history_year'],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'content' => ['title' => 'Content', 'type' => 'editor', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0],
-                'image' => ['title' => 'Image', 'type' => 'image', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0, 'limit' => 1, 'size' => 5],
-            ]
-        ],
-
-        'annual_reports' => [
-            'title' => 'Annual Reports',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => ['timeline_year'],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'image' => ['title' => 'Image', 'type' => 'image', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0, 'limit' => 1, 'size' => 5],
-                'pdf_files' => ['title' => 'PDF Files', 'type' => 'file', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0, 'size' => 50],
-                'xhtml_files' => ['title' => 'XHTML Files', 'type' => 'file', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0, 'size' => 50],
-            ]
-        ],
-
-        'investor_day_presentations' => [
-            'title' => 'Investor Day Presentations',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => ['timeline_year'],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'file' => ['title' => 'File', 'type' => 'file', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'size' => 50, 'limit' => 1]
-            ]
-        ],
-
-        'financial_statements' => [
-            'title' => 'Financial Statements',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => ['timeline_year'],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'period_type' => ['title' => 'Period Type', 'type' => 'text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1, 'useForSeo' => 0],
-                'file' => ['title' => 'File', 'type' => 'file', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'size' => 50, 'limit' => 1]
-            ]
-        ],
-
-        'financial_results' => [
-            'title' => 'Financial Results',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => ['timeline_year', 'financial_results_category'],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'quarter' => ['type' => 'singleSelect', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 0, 'values' => ['q1' => 1, 'q2' => 2, 'q3' => 3, 'q4' => 4], 'keyAsValue' => 1],
-                'file' => ['title' => 'File', 'type' => 'file', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'size' => 50, 'limit' => 1]
-            ]
-        ],
-
-        'view_reports' => [
-            'title' => 'View Reports',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => [],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'file' => ['title' => 'File', 'type' => 'file', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'size' => 50, 'limit' => 1]
-            ]
-        ],
-
-        'share_trading' => [
-            'title' => 'Share Trading',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => [],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'stats_by_year' => [
-                    'title' => 'Stats By Year',
-                    'type' => 'table',
-                    'translate' => 0,
-                    'required' => 0,
-                    'showOnAdminList' => 0,
-                    'useForSeo' => 0,
-                    'fields' => [
-                        'lse_monthly_adtv_shares' => ['type' => 'text', 'title' => 'LSE monthly adtv* (Shares)'],
-                        'otc_monthly_adtv_shares' => ['type' => 'text', 'title' => 'otc** monthly adtv* (Shares)'],
-                        'total_shares' => ['type' => 'text', 'title' => 'Total (Shares)'],
-                        'lse_monthly_adtv' => ['type' => 'text', 'title' => 'LSE monthly adtv* (gbp ‘000)'],
-                        'otc_monthly_adtv' => ['type' => 'text', 'title' => 'otc** monthly adtv* (gbp ‘000)'],
-                        'total' => ['type' => 'text', 'title' => 'total (gbp ‘000)'],
-                    ]
-                ],
-            ]
-        ],
-
-        'navHighlights' => [
-            'title' => 'NAV Highlights',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => [],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-                'change' => ['title' => 'Change', 'type' => 'singleSelect', 'translate' => 0, 'required' => 0, 'useForSeo' => 0, 'values' => ['rise' => 'rise', 'fall' => 'fall']],
-                'navHighlights' => [
-                    'title' => 'NAV Highlights',
-                    'type' => 'multifield2',
-                    'translate' => 1,
-                    'required' => 0,
-                    'showOnAdminList' => 0,
-                    'useForSeo' => 0,
-                    'childs' => [
-                        'tooltip' => ['type' => 'tooltip', 'title' => 'Tooltip Highlights', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 1, 'values' => ['number' => 'number', 'percent' => 'percent', 'value' => 'value'], 'editableTitle' => 1, 'confs' => ['unit', 'percent', 'unit_mm', 'unit_bn', 'GBP']],
+                        'editor' => ['type' => 'editor', 'title' => 'Editor', 'translate' => 1, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'editableTitle' => 1],
+                        'image'  => ['type' => 'image',  'title' => 'Image',  'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'size' => 5, 'editableTitle' => 1],
+                        'file'   => ['type' => 'file',   'title' => 'File',   'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'size' => 20, 'editableTitle' => 1],
                     ],
                 ],
-
-                'tooltipDiagram' => ['type' => 'tooltip', 'title' => 'Tooltip Diagram', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 1, 'values' => ['quarter' => 'quarter', 'amount' => 'amount'], 'editableTitle' => 1],
-            ]
-        ],
-
-        'esg_charts' => [
-            'title' => 'ESG Charts',
-            'route' => 'contentManagement',
-            'slug_field' => 'title',
-            'searchable' => 1,
-            'taxonomy' => [],
-            'fields' => [
-                'title' => ['title' => 'Title', 'type' => 'text', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1, 'useForSeo' => 1],
-
-                'gender_diversity' => ['type' => 'tooltip', 'title' => 'Gender Diversity (Pie chart)', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'values' => ['year' => 'Year', 'male' => 'Male', 'female' => 'Female'], 'limit' => 2],
-                'age_diversity' => ['type' => 'tooltip', 'title' => 'Age Diversity (Bar chart)', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0, 'values' => ['title' => 'Title', 'value' => 'Value']],
-
-            ]
+            ],
         ],
     ],
 
     /// taxonomies
     'taxonomy' => [
 
-        'portfolio_category' => [
-            'select' => 'single', /// multy/single/maxNumber
+        // ── GeoCar taxonomies ────────────────────────────────────────────────
+
+        /// Blog category tabs (blog list page + BlogsSection home)
+        'blog_category' => [
+            'select' => 'multy', /// posts can belong to multiple categories
             'fields' => [
-                'title' => ['title' => 'Portfolio Company', 'type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1],
-                'ownership' => ['title' => 'Ownership', 'type' => 'text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0, 'useForSeo' => 0],
-                'ownership_percent' => ['title' => 'Ownership %', 'type' => 'text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0],
-                'percent_share_in_total_portfolio' => ['title' => '% share in total portfolio', 'type' => 'text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0],
-                'value_gel_mm' => ['title' => 'Value ₾ mm', 'type' => 'text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0],
-                'url' => ['title' => 'URL', 'type' => 'url', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 0],
+                'title' => ['type' => 'text', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1],
             ],
         ],
 
-        'investor_type' => [
-            'select' => 'single', /// multy/single/maxNumber
+        /// FAQ category tabs (faq page)
+        'faq_category' => [
+            'select' => 'single',
             'fields' => [
-                'title' => ['type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1],
+                'title' => ['type' => 'text', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1],
             ],
         ],
 
-        'timeline_year' => [
-            'select' => 'single', /// multy/single/maxNumber
+        /// Branch city filter (branches page)
+        'branch_city' => [
+            'select' => 'single',
             'fields' => [
-                'title' => ['type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1],
+                'title' => ['type' => 'text', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1],
             ],
         ],
 
-        'history_category' => [
-            'select' => 'single', /// multy/single/maxNumber
+        /// Service category (services page)
+        'service_category' => [
+            'select' => 'single',
             'fields' => [
-                'title' => ['type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1],
-                'teaser' => ['type' => 'text', 'translate' => 0, 'required' => 0, 'showOnAdminList' => 1],
+                'title' => ['type' => 'text', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1],
             ],
         ],
 
-        'financial_results_category' => [
-            'select' => 'single', /// multy/single/maxNumber
+        /// Corporate offer category
+        'offer_category' => [
+            'select' => 'single',
             'fields' => [
-                'title' => ['type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1]
-            ],
-        ],
-
-        'history_year' => [
-            'select' => 'multy', /// multy/single/maxNumber
-            'fields' => [
-                'title' => ['type' => 'text', 'translate' => 0, 'required' => 1, 'showOnAdminList' => 1],
+                'title' => ['type' => 'text', 'translate' => 1, 'required' => 1, 'showOnAdminList' => 1],
             ],
         ],
 
@@ -767,51 +612,31 @@ $confs = [
     ///[ 'title'=>'user friendly title', 'content_types'=>['page',....], 'type'=>'content|product', ],
 
     'smartComponents' => [
-        'AboutUs' => ['title' => 'About Us', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'NewsSlider' => ['title' => 'News Slider', 'content_types' => ['news'], 'type' => 'content', 'conf' => []],
-        'MainBanner' => ['title' => 'Main Banner', 'content_types' => ['banner'], 'type' => 'content', 'conf' => ['hide-request-meeting-button']],
-        'NavHighlights' => ['title' => 'Nav Highlights', 'content_types' => ['navHighlights'], 'type' => 'content', 'conf' => []],
-        'AboutBox' => ['title' => 'About box', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'QuickLinks' => ['title' => 'Quick links', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'Portfolio' => ['title' => 'Portfolio', 'content_types' => ['banner'], 'type' => 'content', 'conf' => []],
-        'ManageSubscription' => ['title' => 'Manage Subscription', 'content_types' => ['banner'], 'type' => 'content', 'conf' => []],
-        'NewsList' => ['title' => 'News List', 'content_types' => ['news'], 'type' => 'content', 'conf' => []],
-        'MenuBanner' => ['title' => 'Menu Banner', 'content_types' => ['banner'], 'type' => 'content', 'conf' => ['show-breadcrumbs']],
-        'NewsInner' => ['title' => 'News Inner', 'content_types' => ['news'], 'type' => 'content', 'conf' => []],
-        'Governance' => ['title' => 'Governance', 'content_types' => ['governance'], 'type' => 'content', 'conf' => ['five-in-row']],
-        'SimilarNewsSlider' => ['title' => 'Similar News Slider', 'content_types' => ['news'], 'type' => 'content', 'conf' => []],
-        'ContactCard' => ['title' => 'Contact Card', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'DayPresentations' => ['title' => 'DayPresentations', 'content_types' => ['investor_day_presentations', 'financial_statements'], 'type' => 'content', 'conf' => []],
-        'ShareholderMeetings' => ['title' => 'Shareholder Meetings', 'content_types' => ['shareholder_meetings'], 'type' => 'content', 'conf' => []],
-        'Documents' => ['title' => 'Documents', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'BondsKeyData' => ['title' => 'Bonds Key Data', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'AnnualReports' => ['title' => 'Annual Reports', 'content_types' => ['annual_reports'], 'type' => 'content', 'conf' => []],
-        'OurHistory' => ['title' => 'Our History', 'content_types' => ['history'], 'type' => 'content', 'conf' => []],
-        'GcapPortfolioChart' => ['title' => 'Gcap Portfolio Chart', 'content_types' => ['page'], 'type' => 'content', 'conf' => ['slot_next_component']],
-        'NavHighlightsStats' => ['title' => 'Nav Highlights Chart', 'content_types' => ['navHighlights'], 'type' => 'content', 'conf' => ['slot_next_component']],
-        'FinancialResults' => ['title' => 'Financial Results', 'content_types' => ['financial_results'], 'type' => 'content', 'conf' => []],
-        'CreditRatings' => ['title' => 'Credit Ratings', 'content_types' => ['credit_ratings'], 'type' => 'content', 'conf' => []],
-        'TopShareholders' => ['title' => 'Top Shareholders', 'content_types' => ['page'], 'type' => 'content', 'conf' => ['slot_next_component']],
-        'ImageBanner' => ['title' => 'Image Banner', 'content_types' => ['banner'], 'type' => 'content', 'conf' => []],
-        'MacroOverview' => ['title' => 'Macro Overview', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'OpportunityBox' => ['title' => 'Opportunity Box', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'OurStrategy' => ['title' => 'Our Strategy', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'StrategyCard' => ['title' => 'Strategy Card', 'content_types' => ['investment_strategy'], 'type' => 'content', 'conf' => []],
-        'PortfolioCompany' => ['title' => 'Portfolio Company', 'content_types' => ['portfolio_company'], 'type' => 'content', 'conf' => []],
-        'IFrameComponent' => ['title' => 'iFrame Component', 'content_types' => ['page'], 'type' => 'content', 'conf' => ['has-background']],
-        'FinancialStatements' => ['title' => 'Financial Statements', 'content_types' => ['financial_statements'], 'type' => 'content'],
-        'FileDocs' => ['title' => 'File Docs', 'content_types' => ['view_reports', 'page'], 'type' => 'content', 'conf' => ['show_agreement']],
-        'StrategyCycle' => ['title' => 'Strategy Cycle', 'content_types' => ['page'], 'type' => 'content', 'conf' => ['slot_next_component']],
-        'StrategyCycleChart' => ['title' => 'Strategy Cycle Chart', 'content_types' => ['page'], 'type' => 'content', 'conf' => ['slot_next_component']],
-        'TradingChart' => ['title' => 'Trading Chart', 'content_types' => ['share_trading'], 'type' => 'content', 'conf' => []],
-        'TradingTable' => ['title' => 'Trading Table', 'content_types' => ['share_trading'], 'type' => 'content', 'conf' => []],
-        'InvestmentFAQ' => ['title' => 'FAQ', 'content_types' => ['investment_faq'], 'type' => 'content', 'conf' => []],
-        'Table' => ['title' => 'Table', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'NAVCalculator' => ['title' => 'NAV Calculator', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'TextComponent' => ['title' => 'Text Component', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'EsgCards' => ['title' => 'ESG Cards', 'content_types' => ['page'], 'type' => 'content', 'conf' => []],
-        'EsgCharts' => ['title' => 'ESG Charts', 'content_types' => ['esg_charts'], 'type' => 'content', 'conf' => []],
-        'EsgStatistics' => ['title' => 'ESG Statistics', 'content_types' => ['esg_charts'], 'type' => 'content', 'conf' => []],
+        // ── GeoCar smart components ──────────────────────────────────────────
+
+        /// Home page sections
+        'HeroCarousel'    => ['title' => 'Hero Carousel',         'content_types' => ['banner'],          'type' => 'content', 'conf' => []],
+        'AboutSection'    => ['title' => 'About Section',         'content_types' => ['page'],            'type' => 'content', 'conf' => []],
+        'ServicesSection' => ['title' => 'Services Section',      'content_types' => ['service'],         'type' => 'content', 'conf' => ['show-all-link']],
+        'DownloadAppBanner' => ['title' => 'Download App Banner', 'content_types' => ['banner'],          'type' => 'content', 'conf' => []],
+        'QuickConvenient' => ['title' => 'Quick & Convenient',    'content_types' => ['app_feature'],     'type' => 'content', 'conf' => []],
+        'PremiumFeatures' => ['title' => 'Premium Features',      'content_types' => ['premium_feature'], 'type' => 'content', 'conf' => []],
+        'PartnersSection' => ['title' => 'Partners Section',      'content_types' => ['partner'],         'type' => 'content', 'conf' => []],
+        'BlogsSection'    => ['title' => 'Blogs Section (home)',  'content_types' => ['blog'],            'type' => 'content', 'conf' => []],
+
+        /// Blog page / single
+        'BlogList'  => ['title' => 'Blog List',        'content_types' => ['blog'], 'type' => 'content', 'conf' => []],
+        'BlogInner' => ['title' => 'Blog Single Post', 'content_types' => ['blog'], 'type' => 'content', 'conf' => []],
+
+        /// FAQ page
+        'FaqList' => ['title' => 'FAQ List', 'content_types' => ['faq'], 'type' => 'content', 'conf' => []],
+
+        /// Branches page
+        'BranchList' => ['title' => 'Branch List + Map', 'content_types' => ['branch'], 'type' => 'content', 'conf' => []],
+
+        /// Corporate Offers page
+        'CorporateOffers'      => ['title' => 'Corporate Offers List',   'content_types' => ['corporate_offer'], 'type' => 'content', 'conf' => []],
+        'CorporateOfferInner'  => ['title' => 'Corporate Offer Single',  'content_types' => ['corporate_offer'], 'type' => 'content', 'conf' => []],
 
     ],
 

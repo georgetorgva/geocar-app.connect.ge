@@ -14,8 +14,9 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'reqcleaner' => \App\Http\Middleware\RequestCleaner::class,
-            'BasicAuth' => \App\Http\Middleware\BasicAuth::class,
+            'BasicAuth'  => \App\Http\Middleware\BasicAuth::class,
             'requestLog' => \App\Http\Middleware\RequestLog::class,
+            'cache.api'  => \App\Http\Middleware\CacheApiResponse::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

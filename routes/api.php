@@ -336,10 +336,10 @@ Route::group(['prefix'=>'view', 'middleware' => ['api']], function () {
             $controller = new Main();
             try {
                 return $controller->callAction($method, [$request->all()]);
-            }catch (Exception $e){
-                return response('....'.$e->getMessage());
+            } catch (Exception $e) {
+                return response(['error' => $e->getMessage()], 500);
             }
-        });
+        })->middleware('cache.api');
     });
 
     Route::group(['prefix'=>'user'], function(){

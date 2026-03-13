@@ -27,6 +27,7 @@ use App\Http\Controllers\Admin\Media;
 use Illuminate\Support\Facades\Cache;
 use App\Models\Admin\OnlineFormsModel;
 use App\Http\Controllers\Admin\Widgets;
+use App\Models\Shop\ProductsModel;
 
 use App\Http\Controllers\Admin\OnlineForms;
 use App\Http\Controllers\Admin\BankServices;
@@ -278,53 +279,6 @@ class Main extends App\Http\Controllers\Api\ApiController
         return response()->json($cookies, 200, [], JSON_UNESCAPED_UNICODE);
     }
 
-    public function getHomeContent(){
-
-        $homePageMenu = SiteMapModel::select(['id'])->where( 'set_home', 1)->first();
-
-        if(!$homePageMenu)return [];
-
-        $homeData = $this->getCurrentContent( $homePageMenu->id );
-//        p($homeData);
-
-        return ['home_content'=>$homeData, 'home_id'=>$homePageMenu->id];
-
-    }
-
-    public function getCalendar(){
-
-        $request = Request();
-
-        $contentType ='blog';
-        if(is_array($request->taxonomy)){
-             $taxonomy_val = implode(',', $request->taxonomy);
-        }else{
-            $taxonomy_val ='102107';
-        }
-
-        $cacheKey = base64_encode("{$taxonomy_val}-{$contentType}");
-        $value = Cache::store('file')->get('getCurrentContent' . $cacheKey);
-        if ($value) return $value;
-
-        $qr = ("SELECT DISTINCT(date_format(pages.date, '%Y-%m')) as date, date_format(pages.date, '%Y') as 'year', date_format(pages.date, '%m') as month
-                                    FROM pages
-                                        left join modules_taxonomy_relations as tax ON tax.data_id = pages.id
-                                        where pages.content_type like '{$contentType}' and
-                                            pages.status = 'published'  and
-                                            tax.taxonomy_id in ({$taxonomy_val})
-                                        group by pages.id
-                                        order by pages.date desc
-                                        limit 1000
-                                        ");
-        $ret = DB::select( $qr );
-
-        Cache::put('getCurrentContent' . $cacheKey, response($ret), env('CACHE_LIST_VIEW', 2));
-
-
-        return $ret;
-
-    }
-
     /**
      * @OA\Post( path="/view/main/getCurrentContent", tags={"Public website data"}, summary="dinamic method to get content depend on site location", operationId="getCurrentContent",
      *   @OA\Parameter( name="request params", description="request params", required=true, in="path",
@@ -337,18 +291,15 @@ class Main extends App\Http\Controllers\Api\ApiController
      */
     public function getCurrentContent($menuId = false)
     {
-        //
         $request = Request();
         $singleRequest = $this->checkSingleRequestData($request->all());
-        //        p($request->all());
         $locale = requestLan();
 
         $cacheKey = base64_encode(json_encode($request->all()) . $locale);
-        $cacheType = $singleRequest['single'] ? 'CACHE_SINGLE_VIEW' : 'CACHE_LIST_VIEW';
-        $value = Cache::store('file')->get('getCurrentContent' . $cacheKey);
-        if ($value) return $value;
+        $cacheType = $singleRequest['single'] ? 'cache_single_view' : 'cache_list_view';
 
-        $start = microtime(true);
+        $value = Cache::store('file')->get('getCurrentContent' . $cacheKey);
+        if ($value !== null) return response($value);
 
         /// if not set menu id ($contentid) return false
         if (!$menuId && $request->contentid) $menuId = $request->contentid;
@@ -358,25 +309,17 @@ class Main extends App\Http\Controllers\Api\ApiController
 
         /// get requested menu
         $currentMenu = $menuItem->getOne(['id' => $menuId]);
-        //        $rr = _toArray($currentMenu);
-//        p($currentMenu);
 
         /// if can't find menu return false
         if (!isset($currentMenu['id'])) return [];
         $ret = [];
 
-        /// check primary_data is array; if not set empty array
-        if (!_cv($currentMenu, 'primary_data', 'ar')) $currentMenu['primary_data'] = [];
-
         /// select secondary content
         if (_cv($currentMenu, 'secondary_data')) {
-//            p($currentMenu['secondary_data']);
             $ret['secondary'] = $this->getContentLoop($currentMenu['secondary_data'], $currentMenu['secondary_template'], $request->all(), $singleRequest);
         }
 
-
-        $ret['exectime'] = microtime(true) - $start;
-        Cache::put('getCurrentContent' . $cacheKey, response($ret), env($cacheType, 2));
+        Cache::store('file')->put('getCurrentContent' . $cacheKey, $ret, config('app.' . $cacheType, 60));
 
         return response($ret);
     }
@@ -412,19 +355,17 @@ class Main extends App\Http\Controllers\Api\ApiController
                 $v['useContent'] = 1;
             }
 
-            $v['unicId'] = isset($v['unicId']) ? $v['unicId'] : '8';
-            $v['componentName'] = isset($v['selectedComponent']) ? $v['selectedComponent'] : '8';
+            $v['unicId'] = isset($v['unicId']) ? $v['unicId'] : null;
+            $v['componentName'] = isset($v['selectedComponent']) ? $v['selectedComponent'] : null;
 
             /// if place does not exists continue
-            if (!isset($smartComponentsConfig[$v['componentName']]))continue;
+            if (!$v['componentName'] || !isset($smartComponentsConfig[$v['componentName']]))continue;
 
             $v['componentMainConfigs'] = $smartComponentsConfig[$v['componentName']];
             $v['porc'] = _cv($v['componentMainConfigs'], 'type');
             $v['content-category'] = _cv($req, 'content-category');
 
-            //            $ret["{$v['componentName']}_{$v['unicId']}"] = (_cv($v, 'useContent', 'nn')==1)?$this->getContentByMenuPlace($v):[];
-
-            $ret["{$v['componentName']}_{$v['unicId']}"] = $this->getContentByMenuPlace($v);
+            $ret["{$v['componentName']}_{$v['unicId']}"] = (_cv($v, 'useContent', 'nn') == 1) ? $this->getContentByMenuPlace($v) : [];
 
         }
 
@@ -446,49 +387,36 @@ class Main extends App\Http\Controllers\Api\ApiController
 
         $locale = requestLan();
 
-        $params['header'] = _cv($params, 'header.' . $locale);
+        $params['header']   = _cv($params, 'header.' . $locale);
         $params['siteMode'] = siteMode();
 
         $componentIsSinglePrimary = (_cv($params, 'doPrimary') && _cv($params, 'primary') == 1 && _cv($params, 'singleLayout') == 1) ? true : false;
 
-        //        if(_cv($v, 'primary')==1 && _cv($v, 'singleLayout')==1)continue;
-
-        //        $taxonomy = $taxonomyModel->getTaxonomyByTermId(['id'=>$request->searchTerms]);
         /// filter secondary data (component data) by url content-category param (content-category means term id)
         /// if === filterFromContentCategoryParam checked AND url param content-category exists AND component has by taxonomy filter set some taxonomy
         if (_cv($params, 'filterFromContentCategoryParam') == 1 && _cv($params, 'content-category', 'nn') && _cv($params, 'taxonomy')) {
             $taxonomyModel = new TaxonomyModel();
-
             $taxonomy = $taxonomyModel->getTaxonomyByTermId(['id' => $params['content-category']]);
             if ($taxonomy === _cv($params, 'taxonomy')) {
                 $params['terms'] = [$params['content-category']];
             }
-            //            p($taxonomy);
-//            p($params);
         }
 
         if (_cv($params, 'useContent', 'nn') == 1 && $params['porc'] == 'product') {
-            /// !$componentIsSinglePrimary &&
-            $params['selected_language'] = requestLan();
+            $params['selected_language'] = $locale;
+            $params['translate']         = $locale;
+            $params['status']            = 'published';
+            $params['limit']             = _cv($params, 'limit', 'nn') ? $params['limit'] : 5;
 
-            $product = new App\Models\Shop\ProductsModel();
-            $params['translate'] = $locale;
-            $params['status'] = 'published';
-            $params['limit'] = _cv($params, 'limit', 'nn') ? $params['limit'] : 5;
-
+            $product = new ProductsModel();
             if (_cv($params, 'doPrimary')) {
                 $ret['data'] = $product->getProductsGrouped($params);
                 $product->updateViewCount($params);
             } else {
-                //                p($params);
                 $ret['data'] = $product->getList($params);
             }
-            //            $ret['data'] = $product->getList($params);
-//            $ret['data'] = $product->getProductsGrouped($params);
-
 
         } else if (_cv($params, 'useContent', 'nn') == 1 && $params['porc'] == 'content' && (isset($params['contentType']) || isset($params['taxonomy']) || isset($params['page']))) {
-            // || !_cv($params, 'enabled')  && !$componentIsSinglePrimary
 
             $page = new PageModel();
             $params['translate'] = $locale;
@@ -508,7 +436,6 @@ class Main extends App\Http\Controllers\Api\ApiController
         }elseif(isset($request['singleview']) && intval($request['singleview'])){
             $ret = ['single'=>true, 'type'=>'content', 'id'=>intval($request['singleview']), 'key'=>'singleview'];
         }
-//        p($request);
         return $ret;
     }
 
@@ -1339,25 +1266,28 @@ class Main extends App\Http\Controllers\Api\ApiController
         $cacheNamePart = 'getSitemap_'.base64_encode(json_encode($params));
 
         $value = Cache::store('file')->get($cacheNamePart);
-        if ($value) return $value;
+        if ($value !== null) {
+            if (_cv($params, 'return') == 'routes') {
+                return response()->json($value, 200, [], JSON_UNESCAPED_UNICODE);
+            }
+            return response($value, 200)->header('Content-Type', 'application/xml');
+        }
 
         $locales = config('app.locales');
-        $host = env('WEBSITE_URL', env('APP_URL', '#'));
+        $host = config('app.website_url');
 
         $singleRoutes = '';
         if( _cv($params, 'return')=='routes' ){
             $singleRoutes = $this->singlePageSitemapRoutes(['return'=>'routes']);
-
         }else{
             $singleRoutes = $this->singlePageSitemapRoutes(['return'=>'xml']);
-
         }
 
         $menuItem = new SiteMapModel();
         $menus = $menuItem->getMenuRouted();
 
         $tmpp = [];
-        $tmp = "";
+        $xmlParts = [];
 
         foreach ($locales as $kk=>$vv){
             foreach ($menus as $v){
@@ -1370,38 +1300,42 @@ class Main extends App\Http\Controllers\Api\ApiController
                 if (strpos($v['redirect_url'], '://')!==false)continue;
 
                 $hst = strpos($v['route'], 'http')===false?$host:'';
-                if(isset($tmpp["{$hst}/{$kk}/{$v['route']}"]))continue;
+                $urlKey = "{$hst}/{$kk}/{$v['route']}";
+                if(isset($tmpp[$urlKey]))continue;
 
-                $tmpp[] = "{$hst}/{$kk}/{$v['route']}";
+                $tmpp[$urlKey] = $urlKey;
 
                 $datetime = new DateTime($v['updated_at']);
-                $last_mode=$datetime->format(DateTime::ATOM);
+                $last_mode = $datetime->format(DateTime::ATOM);
 
-                $tmp .= "<url>
-                            <loc>{$hst}/{$kk}/{$v['route']}</loc>
+                $xmlParts[] = "<url>
+                            <loc>{$urlKey}</loc>
                             <lastmod>{$last_mode}</lastmod>
                             <changefreq>weekly</changefreq>
                             <priority>1.0</priority>
                           </url>";
             }
         }
+        $tmp = implode('', $xmlParts);
 
 
+
+        $cacheTtl = config('app.cache_indx', 60);
 
         if( _cv($params, 'return')=='routes' ){
-            Cache::put($cacheNamePart, response()->json(['menu' => $tmpp, 'singleRoutes' => $singleRoutes], 200, [], JSON_UNESCAPED_UNICODE), env('CACHE_INDX', 60));
-
-            return response(['menu' => $tmpp, 'singleRoutes' => $singleRoutes]);
+            $data = ['menu' => array_values($tmpp), 'singleRoutes' => $singleRoutes];
+            Cache::put($cacheNamePart, $data, $cacheTtl);
+            return response()->json($data, 200, [], JSON_UNESCAPED_UNICODE);
 
         }else{ /// return xml version
-            $tmp = '<?xml version="1.0" encoding="UTF-8"?>
+            $xml = '<?xml version="1.0" encoding="UTF-8"?>
                 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
                   '.$tmp.'
                   '.$singleRoutes.'
                 </urlset>';
 
-            Cache::put($cacheNamePart, response($tmp, 200)->header('Content-Type', 'application/xml'), env('CACHE_INDX', 60));
-            return response($tmp, 200)->header('Content-Type', 'application/xml');
+            Cache::put($cacheNamePart, $xml, $cacheTtl);
+            return response($xml, 200)->header('Content-Type', 'application/xml');
         }
 
 
@@ -1411,26 +1345,18 @@ class Main extends App\Http\Controllers\Api\ApiController
     public function singlePageSitemapRoutes($params = []){
 
         $locales = config('app.locales');
-        $host = env('WEBSITE_URL', env('APP_URL', '#'));
-
-
+        $host = config('app.website_url');
 
         $options = new OptionsModel();
         $sitemapModel = new SiteMapModel();
-
-
         $pagesModel = new PageModel();
+
         $singleRoutes = $options->getListByRaw(['key'=>'defaultSingleRoute']);
         $siteMapIds = [];
         $pageIds = [];
         $pageIdsLocalized = [];
-        $pagesXml = "";
+        $xmlParts = [];
 
-/**
-<image:image>
-    <image:loc>https://example.com/image.jpg</image:loc>
-</image:image>
- */
         foreach ($singleRoutes as $k=>$v){
             if(!_cv($v,['value'], 'nn'))continue;
 
@@ -1441,100 +1367,61 @@ class Main extends App\Http\Controllers\Api\ApiController
 
             $pages = $pagesModel->getPages(['content_type'=>$contentType, 'limit'=>1000, 'status'=>'published']);
 
-
             foreach ($pages['list'] as $kk=>$vv){
                 $imagesForSitemap = $this->getImagesForSitemap($vv, $locales);
-//                p($vv);
+
+                // compute date once per page, not once per locale
+                $last_mode = (new DateTime($vv['updated_at']))->format(DateTime::ATOM);
+
                 foreach ($locales as $kkk=>$vvv){
-
-                    $datetime = new DateTime($vv['updated_at']);
-                    $last_mode=$datetime->format(DateTime::ATOM);
-
                     $url = "{$host}/{$kkk}/{$menuItem['fullpath']}/{$vv['id']}-{$vv['slug']}";
                     $pageIds[] = ['path'=>$url, 'media'=>$imagesForSitemap['media']];
                     $pageIdsLocalized[$kkk][] = ['path'=>$url, 'media'=>$imagesForSitemap['media']];
 
-                    $pagesXml .= "<url>
+                    $xmlParts[] = "<url>
                             <loc>{$url}</loc>
                             {$imagesForSitemap['xml']}
                             <lastmod>{$last_mode}</lastmod>
                             <changefreq>weekly</changefreq>
                             <priority>0.5</priority>
                           </url>";
-
                 }
-
             }
 
             $siteMapIds[$contentType] = $v['value'];
-
         }
 
-
-             if( _cv($params, 'return')=='routes' ){
-                return $pageIds;
-        }elseif ( _cv($params, 'return')=='routesLocalized' ){
-                 return $pageIdsLocalized;
-        }elseif ( _cv($params, 'return')=='xml' ){
-                 return $pagesXml;
+        if( _cv($params, 'return')=='routes' ){
+            return $pageIds;
+        }elseif( _cv($params, 'return')=='routesLocalized' ){
+            return $pageIdsLocalized;
+        }elseif( _cv($params, 'return')=='xml' ){
+            return implode('', $xmlParts);
         }
 
+        return [];
     }
 
     private function getImagesForSitemap($data=[], $locales=[]){
         $tmp = ['xml'=>[], 'media'=>[]];
+        // 'xx' covers locale-neutral (non-prefixed) media fields stored on the page
         $locales['xx'] = 'xx';
-            foreach ($locales as $kk=>$vv) {
-                if(!isset($data[$kk]))continue;
-                foreach ($data[$kk] as $kkk=>$vvv){
-                    if(!isset($vvv[0]['url']))continue;
-                    foreach ($vvv as $kkkk=>$vvvv){
-
-//                        $tmp[$vvvv['url']] = $vvvv['url'];
-                        $tmp['media'][$vvvv['url']] = $vvvv['url'];
-                        $tmp['xml'][$vvvv['url']] =
+        foreach ($locales as $kk=>$vv) {
+            if(!isset($data[$kk]))continue;
+            foreach ($data[$kk] as $kkk=>$vvv){
+                if(!isset($vvv[0]['url']))continue;
+                foreach ($vvv as $kkkk=>$vvvv){
+                    $tmp['media'][$vvvv['url']] = $vvvv['url'];
+                    $tmp['xml'][$vvvv['url']] =
 "<image:image>
     <image:loc>{$vvvv['url']}</image:loc>
-</image:image> \n";
-                    }
-
-//                    p($vvv);
+</image:image>\n";
                 }
-//                $ret[]
             }
-//p($tmp);
-
-        return ['xml'=>implode('',array_values($tmp['xml'])), 'media'=>array_values($tmp['media'])];
-    }
-
-
-    public function oldTaxonomiesToNew(){
-
-        $taxonomies = config('adminpanel.taxonomy');
-        $taxonomies = array_keys($taxonomies);
-        print "'".implode("','", $taxonomies)."'";
-
-        $taxMetas = DB::select("select * from pages_meta where `key` in ('product_category','tag','management_category','investors_management_category','news_category','financial_highlights_category','smart_link_category','contact_form_selects','developers','developers_project_status','developers_location')");
-//        p($taxMetas);
-        foreach ($taxMetas as $v){
-            $tmp = [];
-            $val = _psqlCell($v->val);
-
-            $tmp['data_id'] = $v->table_id;
-            $tmp['table'] = 'pages';
-            if(!isset($val[0]))continue;
-            foreach ($val as $kk=>$vv){
-                $tmp['taxonomy_id'] = $vv;
-//            DB::table('modules_taxonomy_relationsxxx')->insert($tmp);
-                p($tmp);
-            }
-
         }
-
-
-
-        return response([]);
+        return ['xml'=>implode('', array_values($tmp['xml'])), 'media'=>array_values($tmp['media'])];
     }
+
 
     public function getVacancyTaxonomies(){
 
@@ -1567,33 +1454,28 @@ class Main extends App\Http\Controllers\Api\ApiController
 
     public function getMetaTags($params=[])
     {
+
         $request = Request();
 
         $locales = config('app.locales');
 
         $validCookie = _cv($_COOKIE, 'validCookies') ? $_COOKIE['validCookies'] : '-';
-        //        print $url = $request->url();
         $url = $params['url'];
         $cacheNamePart = base64_encode(json_encode($params));
 
         $value = Cache::store('file')->get('seoObject_' . $cacheNamePart);
-        if ($value) return $value;
-
+//        if ($value !== null) return response()->json($value, 200, [], JSON_UNESCAPED_UNICODE);
 
         $parseUrl = parse_url($url);
 
         $uri = isset($parseUrl['path']) ? $parseUrl['path'] : '';
         $langFromUrl = substr($uri, 0, 2);
 
-        $currentLang = _cv($params, ['lang'])  ?$params['lang'] : key($locales);
+        $currentLang = _cv($params, ['lang']) ? $params['lang'] : key($locales);
 
         $uriNoLan = str_replace("{$currentLang}/", '', $uri);
 
         $request->headers->set('lang', $currentLang);
-        //        $RedirectionsModel = new App\Models\Admin\RedirectionsModel();
-
-        //        $ret['redirectableUrl'] = $RedirectionsModel->getRedirectionUrl([ 'domain'=>$request->getHttpHost(), 'path'=>$uri ]);
-//        if($ret['redirectableUrl']) return redirect($ret['redirectableUrl']);
 
         $parsedUrl = $this->urlParser($uri, $currentLang);
 
@@ -1609,7 +1491,7 @@ class Main extends App\Http\Controllers\Api\ApiController
 
         $ret = $MetaTags->getMetaTags(['validCookies' => $validCookie, 'path' => $uri, 'pageUrl' => $url, 'lang' => $currentLang, 'menuData' => $selectedMenu, 'parsedUrl' => $parsedUrl, 'menuId' => _cv($selectedMenu, 'id', 'nn')]);
 
-        Cache::put('seoObject_' . $cacheNamePart, response()->json($ret, 200, [], JSON_UNESCAPED_UNICODE), env('CACHE_INDX', 60));
+        Cache::store('file')->put('seoObject_' . $cacheNamePart, $ret, config('app.cache_indx', 60));
 
         return response()->json($ret, 200, [], JSON_UNESCAPED_UNICODE);
     }

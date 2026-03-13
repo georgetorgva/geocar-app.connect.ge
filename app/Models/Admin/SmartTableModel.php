@@ -986,7 +986,7 @@ class SmartTableModel extends Model
         if(!isset($upd->id) || !$upd->id)return false;
 
         $upd[$data['field']] = $data['value'];
-        p($upd);
+//        p($upd);
 
         $upd->save();
 
