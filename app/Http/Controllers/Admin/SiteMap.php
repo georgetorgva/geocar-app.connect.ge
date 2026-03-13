@@ -28,6 +28,17 @@ class SiteMap extends Controller
         return response([]);
     }
 
+    /**
+     * Insert or update a sitemap menu node.
+     *
+     * On insert (no 'id' in request), immediately sets the new node's sort
+     * position to its own id, then regenerates the menu cache once after both
+     * writes complete. On update, upd() regenerates the cache internally.
+     * Response is served from the cache — no extra DB query.
+     *
+     * @param  Request $request  All sitemap node fields; see SiteMapModel::upd().
+     * @return \Illuminate\Http\Response  Full menu list from cache.
+     */
     public function updMenu(Request $request)
     {
 //        p($request->all());

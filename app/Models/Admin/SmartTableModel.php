@@ -20,22 +20,379 @@ class SmartTableModel extends Model
     protected $meta;
     protected $fieldConfigs;
 
-    ///
-///   protected $allAttributes = [];
+    protected $allAttributes = [];
     protected $fillable = [];
     protected $guarded = [];
 
+    /**
+     * Fetch a single record matching the given parameters.
+     *
+     * Thin wrapper around getList() that forces limit=1 and skips the COUNT
+     * query and the sitemap JOIN, since neither is needed for a single-row
+     * lookup. Callers can still opt into the sitemap join by passing
+     * ['withSitemap' => true].
+     *
+     * @param  array $params  Same filter/field options accepted by getList().
+     *                        'id', 'slug', 'status', 'translate', 'fields', etc.
+     * @return array          The first matching row as a flat associative array,
+     *                        with meta data merged in, or [] if nothing matched.
+     */
     public function getOne($params = [])
     {
-        $params['limit'] = 1;
+        $params['limit']       = 1;
+        $params['skipCount']   = true;
+        $params['withSitemap'] = $params['withSitemap'] ?? false;
 
-        $res = $this -> getList($params);
+        $res = $this->getList($params);
 
         if (isset($res['list'][0])) return $res['list'][0];
 
         return [];
     }
 
+    /**
+     * Fetch a paginated, filtered, and localised list of records with EAV meta
+     * data merged into each result row.
+     *
+     * This is the single central data-access method for every CMS entity. It
+     * drives both the admin panel list views and all public API endpoints. The
+     * query is built dynamically in 18 numbered steps (documented inline) from
+     * the field configuration stored in $this->fieldConfigs. The entire pipeline
+     * can be controlled through the $params array described below.
+     *
+     * =========================================================================
+     * HOW FIELD CONFIGURATION WORKS
+     * =========================================================================
+     * $this->fieldConfigs tells the method which columns exist, which are
+     * translatable, how they can be filtered, and how the query should be
+     * ordered by default. It is set once per child model but can be overridden
+     * per call via $params['fieldConfigs'].
+     *
+     * It is accepted in three forms:
+     *
+     *   a) Indexed array of config arrays
+     *      [ configA, configB, ... ]
+     *      All 'fields' keys from every config are merged into configA.
+     *      Use this when a view needs columns from multiple content-type configs.
+     *
+     *   b) Single config array (has a 'fields' key at the top level)
+     *      [ 'fields' => [...], 'regularFields' => [...], ... ]
+     *      Passed directly to the query builder as-is.
+     *
+     *   c) Dot-notation config string
+     *      e.g. 'adminpanel.content_types.news'
+     *      Loaded at call time via Laravel's config() helper. This is the most
+     *      common form — child models set it as a class property string.
+     *
+     * =========================================================================
+     * QUERY EXECUTION ORDER (18 STEPS)
+     * =========================================================================
+     * The method builds a single query object ($qr) and decorates it in a
+     * strict order. Understanding this order is important when debugging
+     * unexpected results:
+     *
+     *   STEPS 1–3   Config resolution and JOIN metadata preparation
+     *   STEP  4     Base query: DB::table($this->table)
+     *   STEP  5     Meta filter JOINs — one LEFT JOIN per active meta filter
+     *   STEP  6     Taxonomy filter JOINs — aliased JOINs + whereIn per group
+     *   STEP  7     Config-defined table JOINs (fields['join'])
+     *   STEP  8     All WHERE filter conditions (id, slug, status, search, …)
+     *   STEP  9     COUNT query — runs HERE before decorative JOINs are added
+     *   STEP  10    Taxonomy SELECT JOIN — GROUP_CONCAT for taxonomy column
+     *   STEP  11    Relations SELECT subqueries — one per fields['relations'] entry
+     *   STEP  12    Remaining SELECT expressions (main table, sitemap, custom)
+     *   STEP  13    GROUP BY + HAVING
+     *   STEP  14    LIMIT / OFFSET (pagination)
+     *   STEP  15    ORDER BY (whitelisted field + direction)
+     *   STEP  16    Main query execution
+     *   STEP  17    Secondary meta query — single IN() fetch for all result IDs
+     *   STEP  18    Per-row post-processing: meta merge, taxonomy decode,
+     *               translation flatten, field whitelist
+     *
+     * The COUNT (step 9) intentionally runs before the GROUP_CONCAT and
+     * relations JOINs (steps 10–12) because those joins are purely decorative
+     * (they add columns to the SELECT but do not filter rows). Running COUNT
+     * after them would force MySQL to execute a heavier query than necessary.
+     *
+     * =========================================================================
+     * FILTERING PARAMS
+     * =========================================================================
+     *
+     * --- 'id'  int | int[] ---
+     *   Filter by primary key. A scalar is automatically wrapped in an array.
+     *   Generates: WHERE {table}.id IN (1, 2, 3)
+     *   Side effect: disables default ORDER BY and replaces it with
+     *   FIELD({table}.id, 1, 2, 3) so the result set preserves the exact
+     *   caller-supplied ID order. Useful for retrieving records in a specific
+     *   sequence (e.g. manually sorted dashboard widgets).
+     *
+     * --- 'slug'  string | string[] ---
+     *   Filter by the slug column. A scalar is wrapped in an array.
+     *   Generates: WHERE {table}.slug IN ('news-article', 'about-us')
+     *
+     * --- 'status'  string | string[] ---
+     *   Filter by the status column. A scalar is wrapped in an array.
+     *   Generates: WHERE {table}.status IN ('published', 'draft')
+     *   Also mirrored onto config-defined joined tables when sameStatus=true
+     *   in the join config (STEP 7), so joined rows must have the same status.
+     *
+     * --- 'sort'  int ---
+     *   Exact match on the integer sort column.
+     *   Generates: WHERE sort = {value}
+     *
+     * --- 'searchText'  string ---
+     *   Full-text LIKE search across two sources simultaneously, joined by OR:
+     *
+     *   1. Regular table columns — any column in fields['regularFields'] that
+     *      has a 'searchable' key is included in a CONCAT() expression:
+     *        CONCAT('-', IFNULL(table.col1,'-'), IFNULL(table.col2,'-')) LIKE '%…%'
+     *
+     *   2. Meta table values — a LEFT JOIN on the meta table (for the active
+     *      locale and 'xx') is added and:
+     *        {metaTable}.val LIKE '%…%'
+     *      The matched meta value is also exposed as 'searchVal' in each row
+     *      so the caller can highlight the matching fragment.
+     *
+     *   HTML tags are stripped from the search term via strip_tags() before
+     *   binding. User input is bound with parameterised ? bindings (never
+     *   interpolated directly into SQL).
+     *
+     * --- 'searchBy'  array ---
+     *   Per-field targeted search using the adminListFields config section.
+     *   Only fields that declare 'searchable' and 'tableKey' are considered.
+     *   Two search modes:
+     *     searchType='where'  → exact match: WHERE {col} = {value}
+     *     (default)           → substring: LOCATE(?, {searchable expression})
+     *   User values are always bound via ? to prevent SQL injection.
+     *
+     * --- 'taxonomy'  array<string, int[]> ---
+     *   AND taxonomy filter. Each key is a taxonomy group name; each value is
+     *   an array of taxonomy IDs the record must belong to.
+     *   Example: ['color' => [3, 7], 'size' => [12]]
+     *   Records must match ALL groups (AND logic). Each group adds its own
+     *   aliased LEFT JOIN + whereIn so the conditions are independent.
+     *   Alias 'taxonomies' is accepted for backward compatibility.
+     *
+     * --- 'taxonomies_or'  array<string, int[]> ---
+     *   OR taxonomy filter. All IDs from all groups are merged into a single
+     *   flat array and a single whereIn is applied:
+     *     WHERE taxonomy_relation_or.taxonomy_id IN (3, 7, 12)
+     *   Records matching ANY of the given IDs are included.
+     *
+     * --- 'relate.taxonomy'  mixed ---
+     *   When truthy, forces the taxonomy SELECT JOIN (STEP 10) to be added
+     *   even if no taxonomy filter is active. Use this when you need the
+     *   'taxonomy' column in the output without filtering by it.
+     *
+     * --- 'whereRaw'  string[] ---
+     *   Array of raw AND WHERE conditions appended verbatim.
+     *   Example: ['pages.created_at > "2024-01-01"', 'pages.pid = 0']
+     *   Each element becomes a separate ->whereRaw() call.
+     *   WARNING: caller is responsible for SQL safety — no binding is applied.
+     *
+     * --- 'orWhereRaw'  string[] ---
+     *   Array of raw OR WHERE conditions. All elements are wrapped in a single
+     *   grouped OR block: WHERE (condA OR condB OR condC).
+     *   WARNING: same SQL safety caveat as 'whereRaw'.
+     *
+     * --- 'having'  array<string, scalar[]> ---
+     *   Raw AND HAVING conditions. Format: ['column' => [value1, value2]].
+     *   Each pair generates: HAVING column=value (one per inner value).
+     *
+     * --- 'orHaving'  array<string, scalar[]> ---
+     *   Same as 'having' but generates OR HAVING conditions.
+     *
+     * --- 'customJsonFilter'  array ---
+     *   JSON column containment filter using Laravel's whereJsonContains().
+     *   Requires a companion 'toFilterArray' param:
+     *     'customJsonFilter' => ['0' => 'column_name']
+     *     'toFilterArray'    => ['0' => ['value1', 'value2']]
+     *   First value uses whereJsonContains, subsequent values use
+     *   orWhereJsonContains.
+     *
+     * =========================================================================
+     * META FIELD FILTERS (via fields['fields'] config)
+     * =========================================================================
+     * Fields declared in fields['fields'] with a 'dbFilter' key can be filtered
+     * by passing $params['{fieldName}'] = value. A dedicated LEFT JOIN on the
+     * meta table is added for that field only (alias: meta_{fieldName}).
+     * Translatable fields join for the active locale; non-translatable fields
+     * join for locale 'xx'.
+     *
+     * Supported dbFilter types for meta fields:
+     *   'whereIn'  — val IN (v1, v2)
+     *   'like'     — val LIKE '%value%'
+     *   'where'    — val = value
+     *   'range'    — val BETWEEN v1 AND v2  (or val = v1 if only one value)
+     *   '>'        — val > value
+     *   '<'        — val < value
+     *
+     * Fields with a 'whereRaw' key always get their JOIN added (regardless of
+     * whether a filter param is present) and the raw condition is appended.
+     *
+     * =========================================================================
+     * REGULAR FIELD FILTERS (via fields['regularFields'] config)
+     * =========================================================================
+     * Main-table columns declared in fields['regularFields'] with a 'dbFilter'
+     * key are filtered by passing $params['{columnName}'] = value. No JOIN is
+     * needed — the condition is applied directly to the main table column.
+     * Supported dbFilter types are identical to meta field filters above.
+     *
+     * =========================================================================
+     * CONFIG-DEFINED TABLE JOINS (fields['join'])
+     * =========================================================================
+     * Additional tables can be joined via the 'join' section of the field
+     * config. Each entry supports:
+     *   'joinTable'   — the table to join
+     *   'joinField'   — column on joinTable to join on
+     *   'joinOn'      — column on main table to join to
+     *   'tablePrefix' — alias base (defaults to joinTable name)
+     *   'sameStatus'  — when true, mirrors the status filter onto joined rows
+     *   'whereRaw'    — array of raw conditions added to the JOIN ON clause
+     *   'select'      — map of columns to expose in SELECT + optional filter rules
+     *
+     * The join alias is always "joinedTable_{tablePrefix}". Columns from joined
+     * tables appear in results as "{tablePrefix}_{columnName}". Joined-table
+     * columns that declare a filter type in 'select' can be filtered via
+     * $params['{joinTable}_{columnName}'].
+     *
+     * =========================================================================
+     * SELECTION PARAMS
+     * =========================================================================
+     *
+     * --- 'fields'  string[] ---
+     *   Output field whitelist applied after all data is merged. Only the listed
+     *   keys are kept in each result row; all others are dropped.
+     *   Example: ['id', 'slug', 'title'] → each row contains only those keys.
+     *   Missing keys default to an empty string ''.
+     *
+     * --- 'regularFieldsSelect'  string[] ---
+     *   Limits the main-table SELECT to specific columns instead of the default
+     *   {table}.*. Useful for performance when only a few columns are needed.
+     *   Example: ['id', 'slug', 'status'] → SELECT {table}.id, {table}.slug, …
+     *
+     * --- 'customSelect'  string ---
+     *   Raw SQL expression appended to the SELECT list verbatim.
+     *   Example: '(SELECT COUNT(*) FROM comments WHERE page_id = pages.id) AS comment_count'
+     *
+     * --- 'fieldConfigs'  mixed ---
+     *   Overrides $this->fieldConfigs for this call only. Accepts any of the
+     *   three fieldConfigs forms described above.
+     *
+     * --- 'meta_keys'  string[] ---
+     *   Restricts the secondary meta query (STEP 17) to only the listed meta
+     *   keys. Applied as a SQL WHERE key IN (...) clause, so unwanted meta rows
+     *   are never loaded from the database. Without this, all meta rows for
+     *   the result IDs are loaded and then all are merged into each row.
+     *
+     * --- 'withSitemap'  bool  (default: true) ---
+     *   When true (the default), LEFT JOINs modules_sitemap_relations and
+     *   exposes 'relatedSitemap' (the sitemap_id) in each result row.
+     *   Pass false to skip this join when the sitemap column is not needed.
+     *   getOne() always passes false to avoid the unnecessary join overhead.
+     *
+     * =========================================================================
+     * ORDERING PARAMS
+     * =========================================================================
+     *
+     * --- 'orderField' / 'sortField'  string ---
+     *   Column to sort by. 'sortField' is an alias for backward compatibility.
+     *   The value is whitelisted against all keys in fields['regularFields'],
+     *   fields['fields'], and the built-in safe columns:
+     *     id, sort, created_at, updated_at
+     *   If an unlisted column name is passed it is silently replaced with the
+     *   config default (fields['orderField']) or 'id'. This prevents SQL
+     *   injection via orderByRaw.
+     *
+     * --- 'orderDirection' / 'sortDirection'  string ---
+     *   Sort direction. 'sortDirection' is an alias for backward compatibility.
+     *   Whitelisted to 'ASC', 'DESC', or 'RANDOM' (case-insensitive).
+     *   Any other value is replaced with the config default or 'desc'.
+     *   'RANDOM' generates ORDER BY RAND() — avoid on large tables.
+     *
+     * --- orderCast (field config flag, not a param) ---
+     *   When a regularField or meta field declares 'orderCast' => true in its
+     *   config, the sort expression becomes CONVERT({table}.{field}, SIGNED).
+     *   This corrects lexicographic ordering when numbers are stored as strings
+     *   (e.g. '10' would sort before '9' without the cast).
+     *
+     * --- 'group_by'  string[] ---
+     *   Overrides the default GROUP BY [{table}.id]. Use when the query's
+     *   natural grouping must be different (e.g. grouping by a joined column).
+     *   Default grouping by primary key is necessary to collapse duplicate rows
+     *   introduced by the one-to-many taxonomy and meta filter JOINs.
+     *
+     * =========================================================================
+     * PAGINATION PARAMS
+     * =========================================================================
+     *
+     * --- 'page'  int ---
+     *   1-based page number. When provided together with 'limit', the query
+     *   uses OFFSET = (page - 1) * limit. When omitted, no OFFSET is applied.
+     *
+     * --- 'limit'  int  (default: 10) ---
+     *   Maximum number of rows to return. Defaults to 10 when not specified.
+     *   When 'page' is also present, LIMIT + OFFSET pagination is applied.
+     *   When 'page' is absent, only LIMIT is applied (no offset).
+     *
+     * --- 'skipCount'  bool ---
+     *   When true, skips the COUNT query entirely and returns listCount=0.
+     *   Used by getOne() to avoid an unnecessary COUNT on single-row lookups.
+     *   Also useful in any context where the caller does not need total count
+     *   (e.g. infinite-scroll UIs that never show a total page count).
+     *
+     * =========================================================================
+     * LOCALISATION PARAMS
+     * =========================================================================
+     *
+     * --- 'translate'  string ---
+     *   Locale code to flatten into (e.g. 'ge', 'en'). When set, each result
+     *   row goes through extractOnlyTranslated(), which:
+     *     1. Finds all locale-keyed sub-arrays in the row (e.g. $row['ge'],
+     *        $row['en'], $row['xx']) and merges them into the top level.
+     *     2. Locale priority: requested locale > 'xx' (non-translatable).
+     *     3. Adds 'localisedto' => '{locale}' to the row so the caller knows
+     *        which locale was applied.
+     *   Without 'translate', all locale buckets are returned as nested arrays
+     *   (raw multi-language structure from the meta table).
+     *   The locale is resolved via requestLan() which falls back to the
+     *   request's own locale header when no explicit value is passed.
+     *
+     * =========================================================================
+     * RETURN VALUE
+     * =========================================================================
+     * Always returns an array with exactly three keys:
+     *
+     *   'list'      => array[]
+     *     Each element is a flat associative array representing one record.
+     *     Main-table columns are present at the top level. Meta fields are
+     *     merged in at the top level (with main-table values taking priority
+     *     over identically-named meta keys). Additional synthesised keys:
+     *       'taxonomy'       — decoded taxonomy map: ['slug' => [id, id], …]
+     *                          present only when taxonomy config is active or
+     *                          'relate.taxonomy' is passed
+     *       'searchVal'      — the meta value that matched 'searchText',
+     *                          present only when 'searchText' is used and
+     *                          $this->metaTable is set
+     *       'relatedSitemap' — sitemap_id from modules_sitemap_relations,
+     *                          present only when withSitemap is true (default)
+     *       'localisedto'    — locale code that was applied,
+     *                          present only when 'translate' param is used
+     *       "relation_{mod}" — JSON-string array of related IDs per module,
+     *                          present for each entry in fields['relations']
+     *       "{prefix}_{col}" — columns from config-defined joined tables
+     *
+     *   'listCount' => int
+     *     Total number of matching records before pagination, used to calculate
+     *     total page count. 0 when 'skipCount' => true is passed.
+     *
+     *   'page'      => int
+     *     The current page number, echoed from $params['page'] or 1 if absent.
+     *
+     * @param  array $params  Filter, selection, ordering, and pagination options.
+     *                        All keys are optional. Unknown keys are ignored.
+     * @return array{list: array[], listCount: int, page: int}
+     */
     public function getList($params = [])
     {
         // =====================================================================
@@ -107,7 +464,6 @@ class SmartTableModel extends Model
         // NOTE: $tableName is now computed outside the inner 'select' loop to
         // correctly handle join entries that have no 'select' block.
         // =====================================================================
-        $tableJoinSelect        = [];
         $tableJoinSelectFilters = [];
         $tableJoinOn            = [];
 
@@ -518,7 +874,7 @@ class SmartTableModel extends Model
         // DISTINCT is still required to collapse duplicate rows produced by
         // the one-to-many taxonomy and meta filter JOINs added in STEPS 5–6.
         // =====================================================================
-        $listCount = $qr->count(DB::raw("DISTINCT({$this->table}.id)"));
+        $listCount = _cv($params, 'skipCount') ? 0 : $qr->count(DB::raw("DISTINCT({$this->table}.id)"));
 
         // =====================================================================
         // STEP 10 — Taxonomy: base JOIN for SELECT GROUP_CONCAT (after COUNT)
@@ -653,8 +1009,11 @@ class SmartTableModel extends Model
         // =====================================================================
         $params['limit'] = $params['limit'] ?? 10;
 
-        if (_cv($params, 'limit')) $qr->take($params['limit']);
-        if (_cv($params, 'page'))  $qr->skip(($params['page'] - 1) * $params['limit'])->take($params['limit']);
+        if (_cv($params, 'page')) {
+            $qr->skip(($params['page'] - 1) * $params['limit'])->take($params['limit']);
+        } elseif (_cv($params, 'limit')) {
+            $qr->take($params['limit']);
+        }
 
         // =====================================================================
         // STEP 15 — Ordering
@@ -701,7 +1060,7 @@ class SmartTableModel extends Model
                 // Numeric-string column: cast to SIGNED so "10" sorts after "9"
                 $qr->orderByRaw("CONVERT({$this->table}.{$orderField}, SIGNED) {$orderDirection}");
             } else {
-                $qr->orderByRaw("{$orderField} {$orderDirection}");
+                $qr->orderByRaw("{$this->table}.{$orderField} {$orderDirection}");
             }
         }
 
@@ -797,7 +1156,8 @@ class SmartTableModel extends Model
         //   4. Field whitelist: when params['fields'] is set, only the listed
         //      keys are kept in the output row.
         // =====================================================================
-        $metaFields = _cv($fields, 'fields');
+        $metaFields    = _cv($fields, 'fields');
+        $locales       = config('app.locales');
 
         foreach ($ret as $k => $v) {
 
@@ -814,7 +1174,7 @@ class SmartTableModel extends Model
 
             // 3. Flatten locale-keyed meta into a single-level array
             if (_cv($params, 'translate')) {
-                $ret[$k] = $this->extractOnlyTranslated($ret[$k], $translate, $metaFields);
+                $ret[$k] = static::extractOnlyTranslated($ret[$k], $translate, $metaFields, $locales);
             }
 
             // 4. Restrict output to caller-specified field whitelist
@@ -834,9 +1194,66 @@ class SmartTableModel extends Model
         return $returnData;
     }
 
+    /**
+     * Create or update a record, including its EAV meta, taxonomy relations,
+     * module relations, and sitemap link — all within a single DB transaction.
+     *
+     * When $data['id'] is absent or falsy the record is created (INSERT).
+     * When $data['id'] is present the existing record is updated (UPDATE).
+     * The entire operation is atomic: if any write fails the transaction is
+     * rolled back and the exception propagates to the caller.
+     *
+     * -------------------------------------------------------------------------
+     * VALIDATION
+     * -------------------------------------------------------------------------
+     * Child-class $rules are applied via Laravel Validator before any DB write,
+     * unless $data['status'] === 'deleted' (soft-delete bypass).
+     * Returns ['success' => false, 'message' => '...'] on validation failure
+     * without touching the database.
+     *
+     * -------------------------------------------------------------------------
+     * SUPPORTED $data KEYS
+     * -------------------------------------------------------------------------
+     * Main table:
+     *   'id'             int         — record to update; omit or 0 to insert
+     *   'status'         string      — record status ('published', 'deleted', …)
+     *                                 defaults to 'published' on insert
+     *   'user_id'        int         — assigned on insert from Auth::user()->id;
+     *                                 admins may override it explicitly
+     *   <fillable cols>  mixed       — any column listed in $this->fillable;
+     *                                 arrays are JSON-encoded via _psqlupd()
+     *
+     * EAV meta (requires $this->metaTable to be set):
+     *   '<locale_code>'  array       — translatable meta fields for that locale
+     *                                 (e.g. 'ge' => ['title' => '…', 'body' => '…'])
+     *   'xx'             array       — non-translatable meta fields
+     *                                 (e.g. 'xx' => ['price' => 100])
+     *
+     * Taxonomy relations (requires $this->taxonomyRelationTable to be set):
+     *   'taxonomy'       array       — taxonomy IDs to associate; existing
+     *                                 relations are replaced (delete + reinsert)
+     *
+     * Module relations (configured via fieldConfigs['relations']):
+     *   "relation_{module}" array   — related IDs for that module; existing
+     *                                 relations for that module are replaced
+     *   'relationNode'   string      — optional node discriminator forwarded
+     *                                 to RelationsModel::doRelations()
+     *
+     * Sitemap:
+     *   'relatedSitemap' int         — sitemap_id to link to this record via
+     *                                  SiteMapModel::doRelation()
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * On success : int   — the id of the created or updated record.
+     * On validation failure : array — ['success' => false, 'message' => string]
+     *
+     * @param  array $data  Record data; see keys above.
+     * @return int|array
+     */
     public function updItem($data = [])
     {
-//        p($data);
         $locales = config('app.locales');
 
         if(_cv($data, 'status') !== 'deleted'){
@@ -852,167 +1269,535 @@ class SmartTableModel extends Model
             if(!_cv($data, ['status']))$data['status'] = 'published';
         }
 
-        /** get or create table entry */
-        $upd = $this->firstOrNew( ['id'=>$id] );
+        return DB::transaction(function () use ($data, $id, $locales) {
 
-//        p($this->fillable);
-        /** updatetable regular fields data */
-        foreach ($this->fillable as $k=>$v){
+            /** get or create table entry */
+            $upd = $this->firstOrNew( ['id'=>$id] );
 
-            /// if editing does not change user
-            if($v == 'user_id' && $id) continue;
+            /** updatetable regular fields data */
+            foreach ($this->fillable as $k=>$v){
 
-            if(!isset($data[$v]))continue;
+                /// if editing does not change user
+                if($v == 'user_id' && $id) continue;
 
-            $upd[$v] = is_array($data[$v])?_psqlupd($data[$v]):$data[$v];
+                if(!isset($data[$v]))continue;
 
-        }
+                $upd[$v] = is_array($data[$v])?_psqlupd($data[$v]):$data[$v];
 
-        /// if change user_id from admin panel allow user changing
-        if(Auth::user() && Auth::user()->status=='admin' && array_search('user_id', $this->attributes)!==false && _cv($data, 'user_id', 'nn')){
-            $upd['user_id'] = $data['user_id'];
-        }
-
-//        p($upd);
-        $upd->save();
-
-        $upd->id;
-
-        $fields = (_cv($this->fieldConfigs, 'fields'))?$this->fieldConfigs:config($this->fieldConfigs);
-//p($fields);
-        /** update table meta fields */
-        if($this->metaTable){
-            $SmartTableMetaModel = new SmartTableMetaModel();
-
-
-            $metaParams['fields'] = _cv($fields, ['fields']);
-            $metaParams['table'] = $this->metaTable;
-            $metaParams['table_id'] = $upd->id;
-            $metaParams['parentTable'] = $this->table;
-
-            foreach ($locales as $k=>$v){
-                if(!isset($data[$k]))continue;
-                $metaParams['lan'] = $k;
-                $metaParams['meta'] = $data[$k];
-                $rr = $SmartTableMetaModel->upd($metaParams);
-            }
-            /// xx for not translatable fields
-            $metaParams['meta'] = _cv($data, ['xx']);
-            $metaParams['lan'] = 'xx';
-            $rr = $SmartTableMetaModel->upd($metaParams);
-        }
-        /** update table related taxonomies */
-        $taxonomies = _cv($data, 'taxonomy', 'ar');
-
-        if ($taxonomies)
-        {
-            $attributesRelationParams['dataList'] = $taxonomies;
-            $attributesRelationParams['relationTable'] = $this->taxonomyRelationTable;
-            $attributesRelationParams['relationTableName'] = $this->table;
-            $attributesRelationParams['firstKeyName'] = 'data_id';
-            $attributesRelationParams['firstKeyValue'] = $upd->id;
-            $attributesRelationParams['secondKeyName'] = 'taxonomy_id';
-            $attributesRelationParams['mainExtraFields'] = ['table'=>$this->table];
-            $attributesRelationParams['formKeyName'] = 'dataList';
-
-
-            RelationsModel::doRelations($attributesRelationParams);
-        }
-
-        if(_cv($fields, 'relations', 'ar')){
-
-            foreach ($fields['relations'] as $k=>$v){
-                $relationsClearOptions['relationTable'] = $v['table'];
-                $relationsClearOptions['firstKeyName'] = $v['id'];
-                $relationsClearOptions['firstKeyValue'] = $upd->id;
-                RelationsModel::removeRelations($relationsClearOptions);
             }
 
-            foreach ($fields['relations'] as $k=>$v){
-//                p("relation_{$v['module']}");
-                if(!isset($data["relation_{$v['module']}"]))continue;
+            /// if change user_id from admin panel allow user changing
+            if(Auth::user() && Auth::user()->status=='admin' && array_search('user_id', $this->fillable)!==false && _cv($data, 'user_id', 'nn')){
+                $upd['user_id'] = $data['user_id'];
+            }
 
-                $relatedData = [];
-                $relatedData['dataList'] = $data["relation_{$v['module']}"];
-                $relatedData['relationTable'] = $v['table'];
-                $relatedData['relationTableName'] = $v['module'];
-                $relatedData['firstKeyName'] = $v['id'];
-                $relatedData['firstKeyValue'] = $upd->id;
-                $relatedData['secondKeyName'] = $v['data_id'];
-//                $relatedData['mainExtraFields'] = ['table'=>$this->table];
-                $relatedData['formKeyName'] = 'dataList';
+            $upd->save();
 
-                if( _cv($data, 'relationNode') ){
-                    $relatedData['relationNode'] = $data['relationNode'];
+            if (is_array($this->fieldConfigs) && isset($this->fieldConfigs[0])) {
+                $fields = $this->fieldConfigs[0];
+                foreach ($this->fieldConfigs as $value) {
+                    foreach ($value['fields'] as $key => $field) {
+                        $fields['fields'][$key] = $field;
+                    }
                 }
-
-                RelationsModel::doRelations($relatedData);
+            } elseif (_cv($this->fieldConfigs, 'fields')) {
+                $fields = $this->fieldConfigs;
+            } else {
+                $fields = config($this->fieldConfigs);
             }
-        }
 
+            /** update table meta fields */
+            if($this->metaTable){
+                $SmartTableMetaModel = new SmartTableMetaModel();
 
-        if(_cv($data, 'relatedSitemap')){
-            SiteMapModel::doRelation([ 'sitemap_id'=>$data['relatedSitemap'], 'table_id'=>$upd->id, 'table'=>$this->table ]);
-        }
+                $metaParams['fields'] = _cv($fields, ['fields']);
+                $metaParams['table'] = $this->metaTable;
+                $metaParams['table_id'] = $upd->id;
+                $metaParams['parentTable'] = $this->table;
 
+                foreach ($locales as $k=>$v){
+                    if(!isset($data[$k]))continue;
+                    $metaParams['lan'] = $k;
+                    $metaParams['meta'] = $data[$k];
+                    $SmartTableMetaModel->upd($metaParams);
+                }
+                /// xx for not translatable fields
+                $metaParams['meta'] = _cv($data, ['xx']);
+                $metaParams['lan'] = 'xx';
+                $SmartTableMetaModel->upd($metaParams);
+            }
 
-        return $upd->id;
+            /** update table related taxonomies */
+            $taxonomies = _cv($data, 'taxonomy', 'ar');
+
+            if ($taxonomies)
+            {
+                $attributesRelationParams['dataList'] = $taxonomies;
+                $attributesRelationParams['relationTable'] = $this->taxonomyRelationTable;
+                $attributesRelationParams['relationTableName'] = $this->table;
+                $attributesRelationParams['firstKeyName'] = 'data_id';
+                $attributesRelationParams['firstKeyValue'] = $upd->id;
+                $attributesRelationParams['secondKeyName'] = 'taxonomy_id';
+                $attributesRelationParams['mainExtraFields'] = ['table'=>$this->table];
+                $attributesRelationParams['formKeyName'] = 'dataList';
+
+                RelationsModel::doRelations($attributesRelationParams);
+            }
+
+            if(_cv($fields, 'relations', 'ar')){
+
+                foreach ($fields['relations'] as $k=>$v){
+                    if(!isset($data["relation_{$v['module']}"]))continue;
+
+                    $relatedData = [];
+                    $relatedData['dataList'] = $data["relation_{$v['module']}"];
+                    $relatedData['relationTable'] = $v['table'];
+                    $relatedData['relationTableName'] = $v['module'];
+                    $relatedData['firstKeyName'] = $v['id'];
+                    $relatedData['firstKeyValue'] = $upd->id;
+                    $relatedData['secondKeyName'] = $v['data_id'];
+                    $relatedData['formKeyName'] = 'dataList';
+
+                    if( _cv($data, 'relationNode') ){
+                        $relatedData['relationNode'] = $data['relationNode'];
+                    }
+
+                    RelationsModel::doRelations($relatedData);
+                }
+            }
+
+            if(_cv($data, 'relatedSitemap')){
+                SiteMapModel::doRelation([ 'sitemap_id'=>$data['relatedSitemap'], 'table_id'=>$upd->id, 'table'=>$this->table ]);
+            }
+
+            return $upd->id;
+
+        });
     }
 
+    /**
+     * Update a single column on an existing record by ID.
+     *
+     * Lighter alternative to updItem() when only one field needs to change.
+     * Does not touch meta, taxonomy, relations, or the sitemap — it writes
+     * exactly one column in one UPDATE query with no prior SELECT.
+     *
+     * -------------------------------------------------------------------------
+     * VALIDATION
+     * -------------------------------------------------------------------------
+     * Three fields are required before any DB work is attempted:
+     *   'id'    — must be present and numeric; the record to update
+     *   'field' — must be present; the column name to change
+     *   'value' — must be present; the new value to write
+     *
+     * Returns ['error' => '...'] on validation failure without touching the DB.
+     *
+     * -------------------------------------------------------------------------
+     * SECURITY — FIELD WHITELIST
+     * -------------------------------------------------------------------------
+     * 'field' is validated against $this->fillable before the UPDATE is issued.
+     * If the requested column is not in the fillable list the method returns
+     * ['error' => 'Field not allowed.'] and no query is executed.
+     * This prevents callers from patching arbitrary columns (e.g. user_id,
+     * created_at) by passing a crafted 'field' value through the request.
+     *
+     * -------------------------------------------------------------------------
+     * SUPPORTED $data KEYS
+     * -------------------------------------------------------------------------
+     *   'id'     int     — primary key of the record to update (required)
+     *   'field'  string  — column name to update; must be in $this->fillable
+     *   'value'  mixed   — new value to write to that column
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     *   int   — the record ID on success
+     *   false — record not found
+     *   array — ['error' => string] on validation failure or disallowed field
+     *
+     * @param  array $data  Must contain 'id', 'field', and 'value'.
+     * @return int|false|array
+     */
     public function updField($data = [])
     {
-
-        $locales = config('app.locales');
-
         /** validate table regular data depend on child class rules */
-        $rules['id'] = ['required','numeric'];
+        $rules['id']    = ['required', 'numeric'];
         $rules['field'] = ['required'];
-        // $rules['value'] = ['required'];
+        $rules['value'] = ['required'];
 
-        $validator = \Validator::make($data, $rules);
-//        p($validator);
-        if ($validator->fails()) { return ['error'=>$validator->errors()->first()]; }
+        $validator = Validator::make($data, $rules);
+        if ($validator->fails()) { return ['error' => $validator->errors()->first()]; }
 
-        $id = _cv($data, 'id', 'nn');
+        /** find existing record */
+        $upd = $this->find($data['id']);
 
-        if(!$id){
-            if(!_cv($data, ['user_id']))$data['user_id'] = Auth::user()->id;
-            if(!_cv($data, ['status']))$data['status'] = 'published';
+        if (!$upd) return false;
+
+        if (!in_array($data['field'], $this->fillable)) {
+            return ['error' => 'Field not allowed.'];
         }
 
-        /** get or create table entry */
-        $upd = $this->find( $data['id'] );
+        DB::table($this->table)
+            ->where('id', $data['id'])
+            ->update([$data['field'] => $data['value']]);
 
-        if(!isset($upd->id) || !$upd->id)return false;
-
-        $upd[$data['field']] = $data['value'];
-//        p($upd);
-
-        $upd->save();
-
-        return $upd->id;
+        return $data['id'];
 
     }
 
+    /**
+     * Soft-delete a record by setting its status column to 'deleted'.
+     *
+     * The record remains in the database and can be restored by updating its
+     * status back to 'published' (or any other active status). Meta data,
+     * taxonomy relations, and module relations are left intact so the record
+     * can be fully recovered.
+     *
+     * -------------------------------------------------------------------------
+     * INPUT NORMALIZATION
+     * -------------------------------------------------------------------------
+     * $data may be passed either as an associative array ['id' => 5] or as a
+     * plain scalar (e.g. deleteItem(5)). A scalar is automatically wrapped into
+     * ['id' => value] before any further processing.
+     *
+     * -------------------------------------------------------------------------
+     * EXISTENCE CHECK
+     * -------------------------------------------------------------------------
+     * An EXISTS query is issued before the UPDATE. This ensures the return
+     * value reflects whether the record was found, not whether any rows were
+     * changed. A record that already has status='deleted' still returns its ID
+     * rather than 0 (which the UPDATE alone would produce when 0 rows change).
+     *
+     * -------------------------------------------------------------------------
+     * SUPPORTED $data KEYS
+     * -------------------------------------------------------------------------
+     *   'id'  int  — primary key of the record to soft-delete (required, > 0)
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     *   int   — the record ID on success
+     *   false — id missing / not a positive integer, or record not found
+     *
+     * @param  array|int $data  Associative array with 'id' key, or a plain int ID.
+     * @return int|false
+     */
     public function deleteItem($data = [])
     {
-        if(!_cv($data, 'id', 'nn'))return false;
+        if (!is_array($data)) $data = ['id' => $data];
 
-        $deleteStatus = DB::table($this->table)->where('id', $data['id'])->update(['status' => 'deleted']);
+        if (!_cv($data, 'id', 'nn')) return false;
 
-        return $deleteStatus?$data['id']:0;
+        $exists = DB::table($this->table)->where('id', $data['id'])->exists();
+
+        if (!$exists) return false;
+
+        DB::table($this->table)->where('id', $data['id'])->update(['status' => 'deleted']);
+
+        return $data['id'];
 
     }
 
+    /**
+     * Permanently delete a record and all its associated data.
+     *
+     * Unlike deleteItem(), this issues a physical DELETE from the main table
+     * and cascades the removal to all dependent tables within a single
+     * transaction. The operation is irreversible — there is no way to recover
+     * the record once this method completes.
+     *
+     * -------------------------------------------------------------------------
+     * CASCADED DELETIONS (inside one transaction)
+     * -------------------------------------------------------------------------
+     * 1. Main table row:        DELETE FROM {table} WHERE id = {id}
+     * 2. EAV meta rows:         DELETE FROM {metaTable}
+     *                               WHERE table_id = {id} AND table = '{table}'
+     *                           Skipped when $this->metaTable is empty.
+     * 3. Taxonomy relations:    DELETE FROM {taxonomyRelationTable}
+     *                               WHERE data_id = {id} AND table = '{table}'
+     *                           Skipped when $this->taxonomyRelationTable is empty.
+     *
+     * If any of the three deletes fails the transaction is rolled back and an
+     * exception propagates to the caller — no partial state is left behind.
+     *
+     * NOTE: module relation tables (fields['relations']) are not cascaded here
+     * because their table names are defined in fieldConfigs, which is not
+     * loaded by this method. If the model has module relations, clean them up
+     * manually before or after calling hardDeleteItem().
+     *
+     * -------------------------------------------------------------------------
+     * INPUT NORMALIZATION
+     * -------------------------------------------------------------------------
+     * $data may be passed either as an associative array ['id' => 5] or as a
+     * plain scalar (e.g. hardDeleteItem(5)). A scalar is automatically wrapped
+     * into ['id' => value] before any further processing.
+     *
+     * -------------------------------------------------------------------------
+     * EXISTENCE CHECK
+     * -------------------------------------------------------------------------
+     * An EXISTS query is issued before the transaction begins. If the record
+     * is not found the method returns false immediately with no DB writes.
+     *
+     * -------------------------------------------------------------------------
+     * SUPPORTED $data KEYS
+     * -------------------------------------------------------------------------
+     *   'id'  int  — primary key of the record to delete (required, > 0)
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     *   int   — the deleted record ID on success
+     *   false — id missing / not a positive integer, or record not found
+     *
+     * @param  array|int $data  Associative array with 'id' key, or a plain int ID.
+     * @return int|false
+     */
     public function hardDeleteItem($data = [])
     {
-        if(!_cv($data, 'id', 'nn'))return false;
+        if (!is_array($data)) $data = ['id' => $data];
 
-        $deleteStatus = DB::table($this->table)->where('id', $data['id'])->limit(1)->delete();
+        if (!_cv($data, 'id', 'nn')) return false;
 
-        return $deleteStatus?$data['id']:0;
+        $exists = DB::table($this->table)->where('id', $data['id'])->exists();
+
+        if (!$exists) return false;
+
+        DB::transaction(function () use ($data) {
+            DB::table($this->table)->where('id', $data['id'])->delete();
+
+            if ($this->metaTable) {
+                DB::table($this->metaTable)
+                    ->where('table_id', $data['id'])
+                    ->where('table', $this->table)
+                    ->delete();
+            }
+
+            if ($this->taxonomyRelationTable) {
+                DB::table($this->taxonomyRelationTable)
+                    ->where('data_id', $data['id'])
+                    ->where('table', $this->table)
+                    ->delete();
+            }
+        });
+
+        return $data['id'];
 
     }
+
+    public function reverseArray($sourceArray)
+    {
+        if (!is_array($sourceArray)) return [];
+
+        $destArray = [];
+
+        foreach ($sourceArray as $key => $value)
+        {
+            $destArray[$value][] = $key;
+        }
+
+        return $destArray;
+    }
+
+    /**
+     * Flatten a multi-locale result row into a single-level array for one locale.
+     *
+     * After getList() merges EAV meta data, each row contains locale-keyed
+     * sub-arrays (e.g. $row['ge'], $row['en']) for translatable fields and a
+     * special 'xx' bucket for non-translatable fields. This method collapses
+     * all of that into a flat associative array for the requested locale, then
+     * removes the raw locale buckets from the row so the caller receives a
+     * clean, single-level structure.
+     *
+     * -------------------------------------------------------------------------
+     * MERGE STRATEGY AND KEY PRIORITY
+     * -------------------------------------------------------------------------
+     * The final row is assembled in three layers using the + union operator,
+     * which preserves the FIRST occurrence of each key:
+     *
+     *   1. $data              — main-table columns (highest priority)
+     *   2. $notTranslatableData ('xx' bucket) — non-translatable meta fields
+     *   3. $translatedData    — locale-specific meta fields (lowest priority)
+     *
+     * Main-table columns are never overwritten by meta values, even if a meta
+     * field shares the same name as a column (e.g. 'status', 'slug').
+     *
+     * -------------------------------------------------------------------------
+     * LOCALE RESOLUTION
+     * -------------------------------------------------------------------------
+     * The effective locale is resolved in this order:
+     *   1. $translate if it exists as a key in $locales
+     *   2. array_key_first($locales) — the application's default locale
+     *
+     * This means passing an unrecognised locale code silently falls back to
+     * the default rather than returning an empty row.
+     *
+     * -------------------------------------------------------------------------
+     * FIELD CONFIG FILTERING
+     * -------------------------------------------------------------------------
+     * When $fields (the 'fields' section of fieldConfigs) is provided, any key
+     * in the locale bucket that is NOT marked 'translate' => 1 in the config
+     * is stripped from $translatedData before merging. This prevents
+     * non-translatable meta fields from leaking into the translated output
+     * when they were also stored under a locale key.
+     *
+     * -------------------------------------------------------------------------
+     * LOCALE BUCKET CLEANUP
+     * -------------------------------------------------------------------------
+     * Before the final merge, all locale-keyed sub-arrays ('xx' and every key
+     * in $locales) are removed from $data so they do not appear in the output
+     * row alongside the already-flattened values.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMETERS
+     * -------------------------------------------------------------------------
+     * @param  array       $data       Full result row as returned by mergeToMetaData(),
+     *                                 containing main-table columns plus locale buckets.
+     * @param  string|null $translate  Locale code to flatten into (e.g. 'ge', 'en').
+     *                                 Null or an unrecognised code falls back to the
+     *                                 application's default locale.
+     * @param  array|null  $fields     The 'fields' section of fieldConfigs, used to
+     *                                 determine which keys in the locale bucket are
+     *                                 genuinely translatable. Pass null or [] to skip
+     *                                 field-level filtering.
+     * @param  array|null  $locales    Pre-resolved app locales array (from
+     *                                 config('app.locales')). When null, loaded from
+     *                                 config at call time. Pass the pre-resolved value
+     *                                 when calling inside a loop to avoid repeated
+     *                                 config() calls per row.
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array  Flat associative array with:
+     *                  - all main-table columns
+     *                  - non-translatable meta fields from 'xx' merged in
+     *                  - translatable meta fields for the resolved locale merged in
+     *                  - 'localisedto' => string  the locale code that was applied
+     *                  - locale bucket keys removed ('xx', 'ge', 'en', …)
+     */
+    public static function extractOnlyTranslated($data = [], $translate = null, $fields = [], $locales = null){
+        $locales = $locales ?? config('app.locales');
+        $locale = isset($locales[$translate]) ? $translate : array_key_first($locales);
+
+        $notTranslatableData = _cv($data, 'xx', 'ar')    ?: [];
+        $translatedData      = _cv($data, $locale, 'ar') ?: [];
+
+        /// if exists field configs
+        /// check field is translatable or not; leave translatable fields; unset non translatable fields from translated object
+        if (is_array($fields) && count($fields) > 0) {
+            foreach ($fields as $k=>$v){
+                if(isset($v['translate']) && $v['translate']==1)continue;
+                if(isset($translatedData[$k]))unset($translatedData[$k]);
+            }
+        }
+
+
+        /// unset translatable objects
+        if(isset($data["xx"])) unset($data["xx"]);
+        foreach ($locales as $kk=>$vv){
+            if(isset($data[$kk])) unset($data[$kk]);
+        }
+
+        $data = $data + $notTranslatableData + $translatedData;
+
+        $data['localisedto'] = $locale;
+
+        return $data;
+    }
+
+    public function checkUser($id){
+        $check = DB::table($this->table)->where('id', $id)->where('user_id', Auth::user()->id)->first();
+        if(!$check){
+            return response(['status'=>'error', 'message'=>'User not belongs to this record!']);
+        }
+    }
+
+    /**
+     * Update the sort order of multiple records in a single atomic query.
+     *
+     * Accepts an ordered list of record IDs (as sent by a drag-and-drop UI)
+     * and writes the new sort value for every ID in one UPDATE statement using
+     * a CASE WHEN expression — avoiding the N+1 query pattern of updating
+     * each record individually.
+     *
+     * The entire operation runs inside a DB transaction. If the UPDATE fails
+     * the sort order is left unchanged.
+     *
+     * -------------------------------------------------------------------------
+     * HOW SORT VALUES ARE CALCULATED
+     * -------------------------------------------------------------------------
+     * Each record receives a sort value equal to its zero-based position in
+     * $list plus $startFrom (the pagination offset, see $listParams below).
+     *
+     * Example — page 1, no pagination offset:
+     *   $list = [12, 7, 3]
+     *   → id 12 gets sort = 0
+     *   → id  7 gets sort = 1
+     *   → id  3 gets sort = 2
+     *
+     * Example — page 2, sliceseparator = 10:
+     *   $startFrom = 10
+     *   $list = [5, 9, 1]
+     *   → id 5 gets sort = 10
+     *   → id 9 gets sort = 11
+     *   → id 1 gets sort = 12
+     *
+     * Non-numeric values in $list are silently skipped.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMETERS
+     * -------------------------------------------------------------------------
+     * @param  array $list        Ordered array of record IDs. Must be a numeric
+     *                            array where $list[0] is a valid integer ID.
+     *                            Non-numeric elements are ignored.
+     *                            Example: [12, 7, 3, 5]
+     *
+     * @param  array $listParams  Optional pagination context used to calculate
+     *                            the sort offset for pages beyond the first:
+     *                              'currentPage'    int  — 1-based page number
+     *                              'sliceseparator' int  — page size (rows per page)
+     *                            When either value is absent or zero, $startFrom
+     *                            defaults to 0 (no offset applied).
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return bool  true  — sort order updated successfully
+     *               false — $list is empty or contains no numeric IDs
+     */
+    public function updSort($list = [], $listParams = [])
+    {
+        if (!_cv($list, 0, 'num')) return false;
+
+        $startFrom = 0;
+
+        if (_cv($listParams, 'currentPage', 'nn') && _cv($listParams, 'sliceseparator', 'nn')) {
+            $startFrom = ($listParams['currentPage'] * $listParams['sliceseparator']) - $listParams['sliceseparator'];
+        }
+
+        DB::transaction(function () use ($list, $startFrom) {
+            $cases = '';
+            $ids   = [];
+
+            foreach ($list as $k => $v) {
+                if (!is_numeric($v)) continue;
+                $cases .= 'WHEN ' . (int)$v . ' THEN ' . ($k + $startFrom) . ' ';
+                $ids[]  = (int)$v;
+            }
+
+            if ($ids) {
+                DB::table($this->table)
+                    ->whereIn('id', $ids)
+                    ->update(['sort' => DB::raw('CASE id ' . $cases . 'END')]);
+            }
+        });
+
+        return true;
+    }
+
+    /**
+    custom import methods
+     */
 
     public function importData($data = [])
     {
@@ -1144,56 +1929,6 @@ class SmartTableModel extends Model
         return $res;
     }
 
-    public function reverseArray($sourceArray)
-    {
-        if (!is_array($sourceArray)) return [];
-
-        $destArray = [];
-
-        foreach ($sourceArray as $key => $value)
-        {
-            $destArray[$value][] = $key;
-        }
-
-        return $destArray;
-    }
-
-    public function extractOnlyTranslated($data = [], $translate = false, $fields = []){
-//p($data);
-//p($fields);
-        $locales = config('app.locales');
-        $locale = (isset($locales[$translate]))?$translate:array_key_first($locales);
-
-        $notTranslatableData = _cv($data, 'xx', 'ar')?$data['xx']:[];
-        $translatedData = _cv($data, $locale, 'ar')?$data[$locale]:[];
-
-        /// if exists field configs
-        /// check field is translatable or not; leave translatable fields; unset non translatable fields from translated object
-        if(is_array($fields) && count($fields)>1){
-            foreach ($fields as $k=>$v){
-                if(isset($v['translate']) && $v['translate']==1)continue;
-                if(isset($translatedData[$k]))unset($translatedData[$k]);
-            }
-        }
-
-
-        /// unset translatable objects
-        if(isset($data["xx"])) unset($data["xx"]);
-        foreach ($locales as $kk=>$vv){
-            if(isset($data[$kk])) unset($data[$kk]);
-        }
-
-        $data = array_merge($data, $notTranslatableData, $translatedData);
-
-        $data['localisedto'] = $locale;
-
-        return $data;
-    }
-
-    public function cleanFieldName($name = ''){
-        return str_replace([' ', '-'], '_', $name);
-    }
-
     public function prepareImportableValues($value='', $fieldConfig=[]){
         if(_cv($fieldConfig, 'type')=='select'){
             $tmp = _psqlCell($value);
@@ -1227,27 +1962,9 @@ class SmartTableModel extends Model
         return '';
     }
 
-    public function checkUser($id){
-        $check = DB::table($this->table)->where('id', $id)->where('user_id', Auth::user()->id)->first();
-        if(!$check){
-            return response(['status'=>'error', 'message'=>'User not belongs to this record!']);
-        }
+    public function cleanFieldName($name = ''){
+        return str_replace([' ', '-'], '_', $name);
     }
 
-    public function updSort($list = [], $listParams = [])
-    {
-        $startFrom = 0;
-
-        if (_cv($listParams, 'currentPage', 'nn') && _cv($listParams, 'sliceseparator', 'nn')) {
-            $startFrom = ($listParams['currentPage'] * $listParams['sliceseparator']) - $listParams['sliceseparator'];
-        }
-
-        foreach ($list as $k => $v) {
-            if (!is_numeric($v)) continue;
-            DB::table($this->table)->where('id', $v)->update(['sort' => ($k + $startFrom)]);
-        }
-
-        return false;
-    }
 
 }

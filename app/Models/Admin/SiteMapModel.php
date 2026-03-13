@@ -14,6 +14,8 @@ class SiteMapModel extends Model
     public $timestamps = false;
     public static $relationTable = 'modules_sitemap_relations';
 
+    const MENU_CACHE_TTL = 1000000; // ~11.5 days in seconds
+
 //    protected $transformFields = [
 //        'content_group' => 'contentGroup',
 //    ];
@@ -73,18 +75,46 @@ class SiteMapModel extends Model
 
     ];
 
+    /**
+     * Fetch sitemap menu nodes with their related module associations.
+     *
+     * Executes a LEFT JOIN against modules_sitemap_relations and aggregates
+     * relation rows into a JSON array column 'relatedModules' via GROUP_CONCAT.
+     * COALESCE ensures nodes with no relations return '[]' rather than null.
+     *
+     * Each row's 'media' field is resolved from raw media IDs to full media
+     * records in a single batch query (one getList() call for all rows) rather
+     * than one query per media item.
+     *
+     * Results are ordered by sort ASC, then id DESC.
+     *
+     * -------------------------------------------------------------------------
+     * SUPPORTED $params KEYS
+     * -------------------------------------------------------------------------
+     * @param  array $params {
+     *   'menu_type' string    — filter by menu type (e.g. 'main_menu').
+     *   'id'        int       — filter to a single node by primary key.
+     *   'ids'       int[]     — filter to a set of nodes by primary key.
+     *   'set_home'  bool      — when truthy, return only the home-page node.
+     * }
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array  List of decoded menu node arrays, each containing all
+     *                sitemap columns plus 'relatedModules' (array) and
+     *                'media' (array of resolved media records).
+     */
     public function getListBy($params = [])
     {
-        DB::enableQueryLog();
         $qr = DB::table($this->table)->select(DB::raw("{$this->table}.*,
-        concat('[', GROUP_CONCAT(CONCAT('{\"module\":\"',modules_sitemap_relations.`table`, '\",\"id\":', modules_sitemap_relations.`table_id`, '}')), ']') as relatedModules
+        COALESCE(concat('[', GROUP_CONCAT(CONCAT('{\"module\":\"',modules_sitemap_relations.`table`, '\",\"id\":', modules_sitemap_relations.`table_id`, '}')), ']'), '[]') as relatedModules
         "));
-//        $qr = DB::table($this->table)->select(DB::raw("{$this->table}.*"));
 
-        if (isset($params['menu_type'])) {
+        if (_cv($params, 'menu_type')) {
             $qr->where($this->table.'.menu_type', $params['menu_type']);
         }
-        if (isset($params['id'])) {
+        if (_cv($params, 'id', 'nn')) {
             $qr->where($this->table.'.id', $params['id']);
         }
         if (_cv($params, ['ids'], 'ar')) {
@@ -102,40 +132,65 @@ class SiteMapModel extends Model
 
 
         $list = $qr->get();
-        $query = DB::getQueryLog();
-
-//            p($query);
-
         $list = _psql(_toArray($list));
-        foreach ($list as $k=>$v){
-            $list[$k]['media'] = $this->getMenuMeidas($v['media']);
+
+        $allMediaIds = [];
+        foreach ($list as $v) {
+            if (is_array($v['media'])) {
+                foreach ($v['media'] as $mediaId) {
+                    if (is_numeric($mediaId)) $allMediaIds[] = (int)$mediaId;
+                }
+            }
+        }
+
+        $mediaMap = $allMediaIds
+            ? (new MediaModel())->getList(['ids' => array_unique($allMediaIds), 'idAsKey' => true])
+            : [];
+
+        foreach ($list as $k => $v) {
+            $list[$k]['media'] = $this->getMenuMedias($v['media'], $mediaMap);
         }
 
         return $list;
     }
 
-    public function getKeyValListBy($params = [])
-    {
-        $list = $this->getListBy($params);
-        $ret = [];
-        foreach ($list as $k=>$v){
-            $ret[$v['menu_type']] = $v['value'];
-        }
-
-        return $ret;
-    }
-
+    /**
+     * Fetch a single sitemap node by primary key with resolved media records.
+     *
+     * Loads the row via find(), decodes all JSON columns via _psqlRow(), then
+     * resolves the 'media' field from raw IDs to full media records using a
+     * single batch getList() call rather than one query per media item.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  array $params {
+     *   'id' int  — primary key of the sitemap node (required).
+     * }
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array|false  Decoded node array with resolved 'media' records.
+     *                      [] when the record does not exist.
+     *                      false when 'id' param is missing.
+     */
     public function getOne($params = [])
     {
         if (paramsCheckFailed($params, ['id'])) return false;
 
-        $ret = SiteMapModel::find($params['id']);
+        $ret = $this->find($params['id']);
+
+        if (!$ret) return [];
 
         $ret = _psqlRow(_toArray($ret));
 
-        if(!_cv($ret,['id'], 'nn'))return [];
+        $mediaIds = array_values(array_filter((array)_cv($ret, ['media'], 'ar'), 'is_numeric'));
+        $mediaMap = $mediaIds
+            ? (new MediaModel())->getList(['ids' => $mediaIds, 'idAsKey' => true])
+            : [];
 
-        $ret['media'] = $this->getMenuMeidas(_cv($ret,['media'], 'nn'));
+        $ret['media'] = $this->getMenuMedias($ret['media'], $mediaMap);
 
         return $ret;
     }
@@ -147,36 +202,63 @@ class SiteMapModel extends Model
     }
 
     /**
-     * custom update function
+     * Insert or update a sitemap menu node.
+     *
+     * When 'id' is present, builds an Eloquent instance marked as existing
+     * without issuing a SELECT — all fields are overwritten, so there is no
+     * value in loading the current row first. When 'id' is absent, inserts
+     * a new node with sort = 1.
+     *
+     * After saving, regenerates the full menu cache via generateMenuForSite().
+     *
+     * -------------------------------------------------------------------------
+     * SUPPORTED $params KEYS
+     * -------------------------------------------------------------------------
+     * @param  array $params {
+     *   'id'                 int     — primary key for update; omit to insert.
+     *   'menu_type'          string  — required; menu group identifier.
+     *   'pid'                int     — parent node id.
+     *   'primary_template'   string  — primary template identifier.
+     *   'secondary_template' string  — secondary template identifier.
+     *   'seo'                array   — SEO meta fields; JSON-encoded on save.
+     *   'titles'             array   — localised title map; JSON-encoded on save.
+     *   'url_slug'           string  — URL segment for this node.
+     *   'configs'            array   — config flags; JSON-encoded on save.
+     *   'set_home'           int     — 1 to mark as home page node.
+     *   'secondary_data'     array   — secondary content data; JSON-encoded.
+     *   'primary_data'       array   — primary content data; JSON-encoded.
+     *   'redirect_url'       string  — external or internal redirect target.
+     *   'url_target'         string  — link target attribute (e.g. '_self', '_blank').
+     *   'media'              array   — media field map; JSON-encoded on save.
+     * }
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return int|false  The saved record's id on success.
+     *                    false when 'menu_type' is missing.
      */
     public function upd($params = [])
     {
-//        p($params);
-
         if (!_cv($params, ['menu_type'])) {
             return false;
         }
-        $upd = $params;
-//            dd($upd);
-        if (_cv($params,['id'], 'nn')) {
-            $upd = SiteMapModel::find($params['id']);
-        } else {
 
+        if (_cv($params, ['id'], 'nn')) {
+            $upd = $this->newInstance([], true);
+            $upd->setRawAttributes([$this->getKeyName() => $params['id']], true);
+        } else {
             $upd = new SiteMapModel();
             $upd->sort = 1;
-
         }
-//        p($upd);
-        $upd->menu_type = $params['menu_type']?$params['menu_type']:'main_menu';
 
+        $upd->menu_type = $params['menu_type']?$params['menu_type']:'main_menu';
         $upd->pid = $params['pid']?:'';
-//        $upd->sort = $params['sort']?:'';
         $upd->primary_template = $params['primary_template']?:'';
         $upd->secondary_template = $params['secondary_template']?:'';
         $upd->seo = _psqlupd(_cv($params, 'seo'));
         $upd->titles = _psqlupd(_cv($params, 'titles'));
         $upd->url_slug =  $params['url_slug']?:'';
-
         $upd->configs = _psqlupd(_cv($params, 'configs'));
         $upd->set_home = $params['set_home']?:'';
         $upd->secondary_data = _psqlupd(_cv($params, 'secondary_data'));
@@ -188,12 +270,6 @@ class SiteMapModel extends Model
         }
 
         if(_cv($params, 'media', 'ar')){
-            $tmp = [];
-            foreach ($params['media'] as $k=>$v){
-                $tmp[$k] = isset($v[0])?_cv($v, '0.id', 'nn'):_cv($v, 'id', 'nn');
-            }
-
-//            $upd->media = _psqlupd($tmp);
             $upd->media = _psqlupd($params['media']);
         }
 
@@ -202,123 +278,337 @@ class SiteMapModel extends Model
         $this->generateMenuForSite(true);
 
         return $upd->id;
-//
-//        return false;
     }
 
+    /**
+     * Batch-update sort order and parent nesting for a set of menu nodes.
+     *
+     * Collects all sort and pid values from the input list and executes at most
+     * two UPDATE statements (one CASE WHEN for sort, one for pid) regardless of
+     * how many nodes are being reordered — instead of one SELECT + UPDATE per node.
+     *
+     * Regenerates the full menu cache after the update.
+     *
+     * -------------------------------------------------------------------------
+     * SUPPORTED $params KEYS
+     * -------------------------------------------------------------------------
+     * @param  array $params {
+     *   'sordData' array  — list of node maps, each with:
+     *                        'id'   int — primary key (required per item).
+     *                        'sort' int — new sort position.
+     *                        'pid'  int — new parent node id.
+     * }
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return bool  true on success, false when 'sordData' is missing/empty
+     *               or no valid node ids were found.
+     */
     public function sortMenu($params = []){
-//        p($params['sordData']);
-        foreach ($params['sordData'] as $k=>$v){
-            $this->updateSortAndNesting($v);
+        if (!_cv($params, 'sordData', 'ar')) return false;
+
+        $sortCases = '';
+        $pidCases  = '';
+        $sortBindings = [];
+        $pidBindings  = [];
+        $ids = [];
+
+        foreach ($params['sordData'] as $v) {
+            if (!_cv($v, 'id', 'nn')) continue;
+            $id = (int)$v['id'];
+            $ids[] = $id;
+
+            if (is_numeric($v['sort'] ?? null)) {
+                $sortCases      .= "WHEN {$id} THEN ? ";
+                $sortBindings[]  = (int)$v['sort'];
+            }
+            if (is_numeric($v['pid'] ?? null)) {
+                $pidCases      .= "WHEN {$id} THEN ? ";
+                $pidBindings[]  = (int)$v['pid'];
+            }
         }
+
+        if (empty($ids)) return false;
+
+        $inList = implode(',', $ids);
+
+        if ($sortCases) {
+            DB::statement("UPDATE `{$this->table}` SET `sort` = CASE `id` {$sortCases} END WHERE `id` IN ({$inList})", $sortBindings);
+        }
+        if ($pidCases) {
+            DB::statement("UPDATE `{$this->table}` SET `pid` = CASE `id` {$pidCases} END WHERE `id` IN ({$inList})", $pidBindings);
+        }
+
+        $this->generateMenuForSite(true);
+
         return true;
     }
 
+    /**
+     * Toggle the home-page flag for a menu node and clear it on all others.
+     *
+     * Reads the current set_home value with a single scalar query, computes
+     * the toggled value, then applies a single CASE WHEN UPDATE across the
+     * whole table — setting the target node and zeroing all others in one pass.
+     *
+     * Regenerates the full menu cache after the update.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  array $params {
+     *   'id' int  — primary key of the node to toggle (required).
+     * }
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array|false  Full menu list from getListBy() on success.
+     *                      false when 'id' param is missing.
+     */
     public function setMenuHomePage($params = []){
-// "useAsHomePage":1
         if(!_cv($params, 'id', 'nn'))return false;
 
-        $upd = SiteMapModel::find($params['id']);
-        $upd->set_home = $upd->set_home?0:1;
-        $upd->save();
-        DB::table($this->table)
-            ->where('id','!=', $params['id'])
-            ->update(['set_home' => 0]);
+        $current  = DB::table($this->table)->where('id', $params['id'])->value('set_home');
+        $newValue = $current ? 0 : 1;
+
+        DB::statement(
+            "UPDATE `{$this->table}` SET `set_home` = CASE WHEN `id` = ? THEN ? ELSE 0 END",
+            [$params['id'], $newValue]
+        );
+
+        $this->generateMenuForSite(true);
+
         return $this->getListBy();
     }
 
+    /**
+     * Update the sort position and/or parent id of a single menu node.
+     *
+     * Issues a single targeted UPDATE — no SELECT is performed.
+     * Only the fields present and numeric in $params are written.
+     *
+     * -------------------------------------------------------------------------
+     * SUPPORTED $params KEYS
+     * -------------------------------------------------------------------------
+     * @param  array $params {
+     *   'id'   int  — primary key of the node to update (required).
+     *   'sort' int  — new sort position (optional).
+     *   'pid'  int  — new parent node id (optional).
+     * }
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return bool|false  true when the row was updated.
+     *                     false when 'id' is missing or no valid fields provided.
+     */
     public function updateSortAndNesting( $params = [] ){
-        if (paramsCheckFailed($params, ['id'])) return false; //, 'pid', 'sort'
+        if (paramsCheckFailed($params, ['id'])) return false;
 
-        $upd = SiteMapModel::find( $params['id'] );
-        if( isset($params['pid']) && is_numeric($params['pid']) ){
-            $upd['pid'] = $params['pid'];
-        }
-        if(is_numeric($params['sort'])){
-            $upd['sort'] = $params['sort'];
-        }
+        $fields = [];
+        if (isset($params['pid']) && is_numeric($params['pid']))   $fields['pid']  = (int)$params['pid'];
+        if (isset($params['sort']) && is_numeric($params['sort'])) $fields['sort'] = (int)$params['sort'];
 
-        return $upd->save();
+        if (empty($fields)) return false;
+
+        return (bool) DB::table($this->table)->where('id', $params['id'])->update($fields);
     }
 
-    /** set all child menu nodes as root menus
-     * need after parent node deleting
+    /**
+     * Delete a menu node and promote its direct children to root level.
+     *
+     * Re-parents all direct children (pid = $menuId) to root (pid = 0) in a
+     * single UPDATE, then deletes the node row, then regenerates the menu cache.
+     * Previously this issued one SELECT + one UPDATE per child (N+1).
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  int|string $menuId  Primary key of the node to delete.
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return int|false  The deleted node id on success.
+     *                    false when $menuId is not numeric.
      */
     public function deleteMenuNode($menuId = ''){
         if(!is_numeric($menuId))return false;
 
-        $upd = SiteMapModel::where( 'pid', $menuId)->get()->toArray();
+        DB::table($this->table)->where('pid', $menuId)->update(['pid' => 0]);
 
-        foreach ($upd as $v){
-            $this->changeMenuParam($v['id'], ['pid'=>0]);
-        }
-        SiteMapModel::where('id', $menuId)->delete();
-    }
+        DB::table($this->table)->where('id', $menuId)->delete();
 
-    public function changeMenuParam($menuId = '', $data = []){
-        if(!is_numeric($menuId))return false;
+        $this->generateMenuForSite(true);
 
-        $upd = SiteMapModel::find($menuId);
-
-        foreach ($data as $k=>$v){
-            $upd->{$k} = _psqlupd($v);
-        }
-        $upd->save();
-        return $upd->id;
+        return (int)$menuId;
     }
 
     /**
-     * menu images main field is 'media'
-     * under media there can be many other image fields
-     * main image field is 'cover'
+     * Update arbitrary columns on a single menu node.
+     *
+     * Each value is passed through _psqlupd() before writing — arrays are
+     * JSON-encoded, scalars are stored as-is. Issues a single targeted UPDATE
+     * without loading the model first.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  int|string $menuId  Primary key of the node to update.
+     * @param  array      $data    Column => value map of fields to write.
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return int|false  The node id on success.
+     *                    false when $menuId is not numeric or $data is empty.
+     */
+    public function changeMenuParam($menuId = '', $data = []){
+        if(!is_numeric($menuId) || empty($data))return false;
+
+        $fields = [];
+        foreach ($data as $k => $v){
+            $fields[$k] = _psqlupd($v);
+        }
+
+        DB::table($this->table)->where('id', $menuId)->update($fields);
+
+        return (int)$menuId;
+    }
+
+    /**
+     * Add or replace a media entry on a menu node's media map.
+     *
+     * Reads the current 'media' column with a single scalar query (no full
+     * row load), merges the new file into the map under the given field key,
+     * persists via changeMenuParam(), then returns the updated media map
+     * directly — no second DB read needed.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  array $data {
+     *   'menu_id' int    — primary key of the menu node (required).
+     *   'field'   string — media map key to write (e.g. 'cover') (required).
+     *   'file'    mixed  — file value to store under the field key (required).
+     * }
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array|false  Updated media map on success.
+     *                      false when any required param is missing.
      */
     public function addMenuMedia($data = []){
         if( !_cv($data, 'menu_id', 'nn') || !_cv($data, 'field') || !_cv($data, 'file') )return false;
 
-        $menuNode = $this->getOne(['id'=>$data['menu_id']]);
-//p($menuNode);
-        $data['media'] = _cv($menuNode, 'media','ar')?$menuNode['media']:[];
+        $raw          = DB::table($this->table)->where('id', $data['menu_id'])->value('media');
+        $decoded      = _psqlRow(['media' => $raw]);
+        $data['media'] = _cv($decoded, 'media', 'ar') ? $decoded['media'] : [];
         $data['media'][$data['field']] = $data['file'];
 
-        $changedId = $this->changeMenuParam($data['menu_id'], ['media'=>$data['media']]);
-        $menuNode = $this->getOne(['id'=>$data['menu_id']]);
-//        p($menuNode);
+        $this->changeMenuParam($data['menu_id'], ['media'=>$data['media']]);
 
-        return _cv($menuNode, 'media');
+        return $data['media'];
 
     }
 
+    /**
+     * Clear a media entry from a menu node's media map.
+     *
+     * Reads the current 'media' column with a single scalar query, sets the
+     * given field key to an empty string, then persists via changeMenuParam().
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  array $data {
+     *   'menu_id' int    — primary key of the menu node (required).
+     *   'field'   string — media map key to clear (required).
+     * }
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return int|false  The node id on success.
+     *                    false when any required param is missing.
+     */
     public function deleteMenuMedia($data = []){
         if( !_cv($data, 'menu_id', 'nn') || !_cv($data, 'field') )return false;
 
-        $menuNode = $this->getOne(['id'=>$data['menu_id']]);
-
-        $data['media'] = _cv($menuNode, 'media', 'ar')?$menuNode['media']:[];
+        $raw           = DB::table($this->table)->where('id', $data['menu_id'])->value('media');
+        $decoded       = _psqlRow(['media' => $raw]);
+        $data['media'] = _cv($decoded, 'media', 'ar') ? $decoded['media'] : [];
         $data['media'][$data['field']] = '';
 
         return $this->changeMenuParam($data['menu_id'], ['media'=>$data['media']]);
     }
 
-    public function getMenuMeidas($mediaField = []){
+    /**
+     * Resolve raw media IDs in a media field map to full media record arrays.
+     *
+     * Iterates the map and replaces each numeric value (a media id) with the
+     * corresponding media record. Non-numeric values (already-resolved records
+     * or empty strings) are left untouched.
+     *
+     * When a pre-fetched $mediaMap is provided (id-keyed), lookups are O(1)
+     * array access with no DB queries. When no map is provided, a MediaModel
+     * instance is created lazily on first numeric entry and getOne() is called
+     * per item — only use this path for single-node calls.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  array $mediaField  Media map of field key => media id or record.
+     * @param  array $mediaMap    Optional id-keyed map of pre-fetched media
+     *                            records (from MediaModel::getList idAsKey).
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array  The same map with numeric ids replaced by media records.
+     *                Returns [] when $mediaField is not an array.
+     */
+    public function getMenuMedias($mediaField = [], $mediaMap = []){
         if(!is_array($mediaField))return [];
-        $MediaModel = new MediaModel();
-        foreach ($mediaField as $k=>$v){
+        $MediaModel = null;
+        foreach ($mediaField as $k => $v){
             if(!is_numeric($v)) continue;
-            $mediaField[$k] = $MediaModel->getOne($v);
+            $mediaField[$k] = $mediaMap
+                ? ($mediaMap[$v] ?? false)
+                : ($MediaModel ??= new MediaModel())->getOne($v);
         }
 
         return $mediaField;
-
     }
 
+    /**
+     * Annotate each menu node with a fully resolved 'route' string.
+     *
+     * For redirect nodes the route is the redirect_url value directly.
+     * For normal nodes the route is built by walking up the pid chain and
+     * prepending each ancestor's url_slug, up to a maximum depth of 50.
+     *
+     * Accepts an already-fetched flat menu list to avoid a redundant DB query
+     * when the caller already has the data. Falls back to getListBy() when
+     * no list is provided.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  array $flatMenu  Optional flat list from getListBy(). When empty
+     *                          or omitted, getListBy() is called internally.
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array  Id-keyed map of menu nodes, each with an added 'route' key.
+     */
     public function getMenuRouted($flatMenu = []){
-        $flatMenu = $this->getListBy();
-        $tmp = [];
-        foreach ($flatMenu as $v){
-            $tmp[$v['id']] = $v;
-        }
-
-        $ret = [];
+        $flatMenu = $flatMenu ?: $this->getListBy();
+        $tmp = array_column($flatMenu, null, 'id');
         foreach ($tmp as $k=>$v){
 
             if($v['redirect_url']){
@@ -327,16 +617,11 @@ class SiteMapModel extends Model
             }
 
             $route = $v['url_slug'];
-            $pid = $v['pid'];
-            for ($i=1; $i<=50; $i++){
-                /// if menu doesnot exists
-                if(!isset($tmp[$pid]))break;
-                $route = $tmp[$pid]['url_slug'].'/'.$route;
-
-                /// if menu has no parent
-                if(!$tmp[$pid])break;
-                $pid = $tmp[$pid]['pid'];
-
+            $pid   = $v['pid'];
+            for ($i = 1; $i <= 50; $i++) {
+                if (!isset($tmp[$pid])) break;
+                $route = $tmp[$pid]['url_slug'] . '/' . $route;
+                $pid   = $tmp[$pid]['pid'];
             }
 
             $tmp[$k]['route'] = $route;
@@ -346,42 +631,59 @@ class SiteMapModel extends Model
         return $tmp;
     }
 
-    private function buildTree($data = []){
-
-    }
-
-    private function decodeValues($data)
-    {
-
-        $data = json_decode(json_encode($data),1);
-
-//        if (!isset($data['data_type']) || !isset($data['value'])) {
-//            return false;
-//        }
-//
-//        if ($data['data_type'] != 'json') {
-//            return $data;
-//        }
-//
-//        $tmp = json_decode($data['value'], 1);
-//        $tmp['id'] = $data['id'];
-//        $tmp['menu_type'] = $data['menu_type'];
-//
-//        return $tmp;
-        return $data;
-    }
-
-    /// get menu by full path
+    /**
+     * Resolve a sitemap node by its full URL path.
+     *
+     * First looks for a non-redirect node whose 'fullpath' matches the given
+     * path (NULL and empty redirect_url are both excluded). Falls back to the
+     * node flagged as home (set_home = 1) when no match is found.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  string $path  Full URL path to look up; leading/trailing slashes
+     *                       are stripped before matching.
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array  Decoded node array on success; [] when no match and no
+     *                home node exists.
+     */
     public function getByPath($path = ''){
-        $path = trim($path, '/');
-        $res = DB::table($this->table)->select(['id','menu_type','pid','seo','titles','url_slug','media','configs','secondary_data','redirect_url'])->where('fullpath', $path)->where('redirect_url', '=', '')->first();
+        $path    = trim($path, '/');
+        $columns = ['id','menu_type','pid','seo','titles','url_slug','media','configs','secondary_data','redirect_url'];
 
-        if(!$res) $res = DB::table($this->table)->select(['id','menu_type','pid','seo','titles','url_slug','media','configs','secondary_data','redirect_url'])->where('set_home', 1)->first();
+        $res = DB::table($this->table)->select($columns)->where('fullpath', $path)->where(function($q){ $q->whereNull('redirect_url')->orWhere('redirect_url', '=', ''); })->first();
 
-        $res = _psqlRow(_toArray($res));
-        return $res;
+        if (!$res) $res = DB::table($this->table)->select($columns)->where('set_home', 1)->first();
+
+        if (!$res) return [];
+
+        return _psqlRow(_toArray($res));
     }
 
+    /**
+     * Build and cache the full annotated menu tree for the frontend.
+     *
+     * Returns the cached version when available and $generate is false.
+     * When regenerating: fetches all nodes via getListBy(), computes full URLs
+     * for each node via generateFullUrl(), then persists all fullpath values
+     * back to the DB in a single batch CASE WHEN UPDATE (previously one UPDATE
+     * per node). The result is stored in the file cache under 'menuForSite'.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  bool $generate  When true, bypasses the cache and forces a full
+     *                         rebuild. Default: false.
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array  Sequential list of menu nodes, each with an added
+     *                'fullUrls' map containing locale URLs and path metadata.
+     */
     public function generateMenuForSite($generate = false)
     {
 
@@ -390,37 +692,78 @@ class SiteMapModel extends Model
             return $value;
         }
 
-        $res = $this->getListBy();
-        $idAsKeys = [];
-        foreach ($res as $k => $v) {
-            $idAsKeys[$v['id']] = $v;
-        }
+        $res      = $this->getListBy();
+        $idAsKeys = array_column($res, null, 'id');
+
+        $pathCases    = '';
+        $pathBindings = [];
 
         foreach ($idAsKeys as $k => $v) {
             $idAsKeys[$k]['fullUrls'] = $this->generateFullUrl($k, $idAsKeys);
+            $pathCases      .= "WHEN {$k} THEN ? ";
+            $pathBindings[]  = $idAsKeys[$k]['fullUrls']['fullUrlRelated'];
+        }
+
+        if ($pathCases) {
+            DB::statement(
+                "UPDATE `{$this->table}` SET `fullpath` = CASE `id` {$pathCases} END WHERE `id` IN (" . implode(',', array_keys($idAsKeys)) . ")",
+                $pathBindings
+            );
         }
 
         $idAsKeys = array_values($idAsKeys);
 
-        Cache::put('menuForSite', $idAsKeys, 1000000);
+        Cache::put('menuForSite', $idAsKeys, self::MENU_CACHE_TTL);
 
         return $idAsKeys;
 
     }
 
+    /**
+     * Compute the full URL metadata for a single menu node.
+     *
+     * Walks the ancestor chain via pid pointers to build two URL variants:
+     *   - 'fullUrlRelated'  — full path including all ancestors' slugs.
+     *   - 'urlRelatedShort' — same but skipping nodes flagged 'exclude-from-url'
+     *                         in their configs array.
+     *
+     * For redirect nodes the redirect_url is used directly; absolute URLs
+     * (containing '://') are stored as-is, relative ones are prefixed with
+     * the locale key.
+     *
+     * Per-locale URL strings are added as top-level keys on the returned array.
+     * The DB fullpath write has been moved to the caller (generateMenuForSite)
+     * and is now batched — this method is pure computation only.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  int|string $menuId    Primary key of the node to process.
+     * @param  array      $menuList  Id-keyed flat menu map (from getListBy).
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array{
+     *   urlRelatedShort: string,
+     *   fullUrlRelated: string,
+     *   l: int,
+     *   p: int[],
+     *   ...<string, string>
+     * }
+     */
     public function generateFullUrl($menuId = '', $menuList=[]){
         $ret = [ 'urlRelatedShort'=>'/', 'fullUrlRelated'=>'/', 'l'=>0, 'p'=>[] ];
 
         if(!isset($menuList[$menuId]))return $ret;
         $menu = $menuList[$menuId];
 
-        $host = request()->getSchemeAndHttpHost();
         $locales = config('app.locales');
-        if(isset($menu['redirect_url']) && !empty($menu['redirect_url'])){
+        if (!empty($menu['redirect_url'])) {
 
             $ret = [ 'fullUrlRelated'=>$menu['redirect_url'], 'l'=>1, 'p'=>[0] ];
             foreach ($locales as $k=>$v){
-                if(strpos($menu['redirect_url'], '://')===false){
+                if (!str_contains($menu['redirect_url'], '://')) {
                     $ret[$k] = "/{$k}/{$menu['redirect_url']}";
                 }else{
                     $ret[$k] = $menu['redirect_url'];
@@ -430,12 +773,13 @@ class SiteMapModel extends Model
 
             return $ret;
         }
+        $includeInShort = fn($node) => !is_array($node['configs'] ?? null) || !in_array('exclude-from-url', $node['configs']);
+
         $ret['fullUrlRelated'] = $menu['url_slug'];
 
-        if(!isset($menu['configs']) || !is_array($menu['configs']) || array_search('exclude-from-url', $menu['configs'])===false){
+        if ($includeInShort($menu)) {
             $ret['urlRelatedShort'] = $menu['url_slug'];
         }
-
 
         $ret['l'] = 1;
         $pId = $menu['pid'];
@@ -444,7 +788,7 @@ class SiteMapModel extends Model
             if($pId==0 || !isset($menuList[$pId]))break;
             $ret['fullUrlRelated'] = "{$menuList[$pId]['url_slug']}/{$ret['fullUrlRelated']}";
 
-            if(!isset($menuList[$pId]['configs']) || !is_array($menuList[$pId]['configs']) || array_search('exclude-from-url', $menuList[$pId]['configs'])===false){
+            if ($includeInShort($menuList[$pId])) {
                 $ret['urlRelatedShort'] = "{$menuList[$pId]['url_slug']}/{$ret['urlRelatedShort']}";
             }
 
@@ -456,96 +800,171 @@ class SiteMapModel extends Model
         }
 
         foreach ($locales as $k=>$v){
-//            $ret[$k] = "/{$k}/{$ret['fullUrlRelated']}";
             $ret[$k] = "/{$k}/{$ret['urlRelatedShort']}";
         }
 
-        DB::table($this->table)->where('id', $menuId)->update(['fullpath'=>$ret['fullUrlRelated']]);
-//        p($ret);
         return $ret;
     }
 
-    public function thinMenu($menuList=[], $fields=['id'=>'id', 'title'=>'titles.ge.title', 'pid'=>'pid', 'fullUrl'=>'fullUrls.fullUrlRelated']){
+    /**
+     * Project a full menu list down to a slim field subset.
+     *
+     * Maps each node to only the fields specified in $fields, where each entry
+     * is 'outputKey' => 'sourcePath'. Dot-notation paths (e.g. 'fullUrls.ge')
+     * are resolved via _cv(); flat keys use direct array access.
+     *
+     * When $fields is omitted, defaults to id, pid, a locale-aware title
+     * (resolved via requestLan()), and the fullUrlRelated path.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  array $menuList  Flat menu list as returned by generateMenuForSite()
+     *                          or getListBy().
+     * @param  array $fields    Map of output key => source dot-path. Optional;
+     *                          defaults to a locale-aware standard set.
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array  Sequential list of projected node arrays.
+     *                [] when $menuList is not an array.
+     */
+    public function thinMenu($menuList=[], $fields=[]){
+        if (!is_array($menuList)) return [];
+
+        if (empty($fields)) {
+            $lan    = requestLan();
+            $fields = ['id' => 'id', 'title' => "titles.{$lan}.title", 'pid' => 'pid', 'fullUrl' => 'fullUrls.fullUrlRelated'];
+        }
+
         $ret = [];
 
-        foreach ($menuList as $k=>$v){
+        foreach ($menuList as $v){
             $tmp = [];
-            foreach ($fields as $kk=>$vv){
-                if(isset($v[$vv])){
-                    $tmp[$kk] = $v[$vv];
-                }else{
-                    $tmp[$kk] = _cv($v, $vv);
-                }
+            foreach ($fields as $kk => $vv){
+                $tmp[$kk] = str_contains($vv, '.') ? _cv($v, $vv) : ($v[$vv] ?? null);
             }
             $ret[] = $tmp;
         }
         return $ret;
     }
 
-    /** recursive method
-     * searchs nearest parent menu with template
-     * uses first found menu template
+    /**
+     * Walk up the menu ancestor chain to find the nearest node with a secondary template.
+     *
+     * Previously recursive with one getOne() DB query per hop. Now iterative,
+     * using the cached menu from generateMenuForSite() — zero DB queries on
+     * warm cache, one cache read on cold. Also eliminates the unbounded
+     * recursion risk from pid cycles in the data.
+     *
+     * -------------------------------------------------------------------------
+     * PARAMS
+     * -------------------------------------------------------------------------
+     * @param  array $params {
+     *   'id' int  — primary key of the starting menu node (required).
+     * }
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return array|false  The first ancestor node (inclusive) that has a
+     *                      non-empty secondary_template.
+     *                      false when 'id' is missing, the node is not found,
+     *                      or no ancestor has a secondary template.
      */
     public function findSecondaryContentTemplateConfiguration($params=[]){
         if (paramsCheckFailed($params, ['id'])) return false;
-        $currentMenu = $this->getOne(['id'=>$params['id']]);
-        if(!_cv($currentMenu, 'id', 'nn'))return false;
-        if(_cv($currentMenu, 'secondary_template'))return $currentMenu;
-        if(!_cv($currentMenu, 'pid', 'nn'))return false;
 
-        return $this->findSecondaryContentTemplateConfiguration(['id'=>$currentMenu['pid']]);
+        $menuList = $this->generateMenuForSite();
+        $menuMap  = array_column($menuList, null, 'id');
 
+        $id = $params['id'];
+        while (isset($menuMap[$id])) {
+            $node = $menuMap[$id];
+            if (_cv($node, 'secondary_template')) return $node;
+            if (!_cv($node, 'pid', 'nn')) return false;
+            $id = $node['pid'];
+        }
+
+        return false;
     }
 
     /////// sitemap module relation
 
+    /**
+     * Replace the sitemap relation for a content record.
+     *
+     * Atomically removes any existing relation for the given sitemap_id + table
+     * combination and inserts the new one inside a single DB transaction —
+     * previously the delete and insert were separate unprotected operations.
+     * Regenerates the menu cache after the write.
+     *
+     * -------------------------------------------------------------------------
+     * SUPPORTED $params KEYS
+     * -------------------------------------------------------------------------
+     * @param  array $params {
+     *   'sitemap_id' int    — sitemap node id to relate to (required).
+     *   'table_id'   int    — primary key of the related content record (required).
+     *   'table'      string — table name of the related content record (required).
+     * }
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return bool|false  true on successful insert.
+     *                     false when any required param is missing.
+     */
     public static function doRelation($params = [])
     {
         if(!_cv($params, 'sitemap_id', 'nn') || !_cv($params, 'table_id', 'nn') || !_cv($params, 'table') )return false;
 
-        self::removeRelations(['sitemap_id'=>$params['sitemap_id'], 'table_id'=>$params['table_id'], 'table'=>$params['table'] ]);
+        $ret = DB::transaction(function () use ($params) {
+            self::removeRelations(['sitemap_id'=>$params['sitemap_id'], 'table_id'=>$params['table_id'], 'table'=>$params['table'] ]);
 
-        DB::enableQueryLog();
-        $ret = DB::table(self::$relationTable)->insert(
-            [
-                'sitemap_id'=>$params['sitemap_id'],
-                'table_id'=>$params['table_id'],
-                'table'=>$params['table'],
-            ]
-        );
+            return DB::table(self::$relationTable)->insert([
+                'sitemap_id' => $params['sitemap_id'],
+                'table_id'   => $params['table_id'],
+                'table'      => $params['table'],
+            ]);
+        });
 
-        $query = DB::getQueryLog();
-
-        $sitemap = new SiteMapModel();
-        $sitemap->generateMenuForSite(true);
+        (new static())->generateMenuForSite(true);
 
         return $ret;
     }
 
+    /**
+     * Delete sitemap relations matching a sitemap_id + table combination.
+     *
+     * Used as the delete step inside doRelation()'s transaction before a fresh
+     * relation is inserted. Cache regeneration is intentionally left to the
+     * caller — previously this method regenerated the cache itself, causing a
+     * double rebuild per doRelation() call.
+     *
+     * -------------------------------------------------------------------------
+     * SUPPORTED $params KEYS
+     * -------------------------------------------------------------------------
+     * @param  array $params {
+     *   'sitemap_id' int    — sitemap node id whose relations to remove (required).
+     *   'table'      string — content table name to filter by (required).
+     * }
+     *
+     * -------------------------------------------------------------------------
+     * RETURN VALUE
+     * -------------------------------------------------------------------------
+     * @return bool|false  true on successful delete.
+     *                     false when any required param is missing.
+     */
     public static function removeRelations($params = []){
-//        p($params);
         if(!_cv($params, 'sitemap_id', 'nn') || !_cv($params, 'table') )return false;
-        DB::enableQueryLog();
-        $remove = DB::table(self::$relationTable)
-            ->where('table', $params['table']);
 
-        // if(_cv($params, 'table_id', 'nn')){
-        //     $remove->where('table_id', $params['table_id']);
+        DB::table(self::$relationTable)
+            ->where('table', $params['table'])
+            ->where('sitemap_id', $params['sitemap_id'])
+            ->delete();
 
-        // } elseif
-        if (_cv($params, 'sitemap_id', 'nn')){
-            $remove->where('sitemap_id', $params['sitemap_id']);
-        }
-
-        $remove->delete();
-
-        $query = DB::getQueryLog();
-
-        $sitemap = new SiteMapModel();
-        $sitemap->generateMenuForSite(true);
-
-        return false;
-
+        return true;
     }
 
 

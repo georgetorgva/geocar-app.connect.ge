@@ -7,19 +7,6 @@ use App\Models\Languages\Words;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 
-function getLocales($active = false)
-{
-    static $languages;
-    if (empty($languages)) {
-        $languages = App::make(LanguagesService::class)->languages($active);
-    }
-    if ($active) {
-        return $languages->where('active', 1);
-    } else {
-        return $languages;
-    }
-}
-
 if (!function_exists('array_sort_recursive')) {
     /**
      * Recursively sort an array by keys and values.
@@ -79,50 +66,6 @@ function getDirContents($dir, &$results = array())
     return $results;
 }
 
-function getModules()
-{
-    return false;
-//    $modules = Generator::where('status', 'created')->get();
-//    return $modules;
-}
-
-/**
- * iterates trought array. if there is json decodable data decodes into array
- * @input array
- * @return decoded array
- */
-function decodeJson($data = [])
-{
-    if (!is_array($data)) {
-        return [];
-    }
-    foreach ($data as $k => $v) {
-        $tmp = json_decode($v, 1);
-        if (is_array($tmp)) {
-            $data[$k] = $tmp;
-        }
-    }
-    return $data;
-}
-
-/**
- * iterates trought array. if there is sub array encodes into json
- * @input array
- * @return encoded array
- */
-function encodeJson($data = [])
-{
-    if (!is_array($data)) {
-        return [];
-    }
-    foreach ($data as $k => $v) {
-        if (is_array($v)) {
-            $data[$k] = json_encode($v, JSON_UNESCAPED_UNICODE|JSON_NUMERIC_CHECK);
-        };
-    }
-    return $data;
-}
-
 /** checks if array element exists and check type */
 function _cv($Array = [], $key = false, $CheckType = 'empty')
 {
@@ -162,56 +105,141 @@ function _cv($Array = [], $key = false, $CheckType = 'empty')
     }
 }
 
-/** prepare sql data. check if field is json encripted and decript */
+/**
+ * Decode JSON-encoded fields across an entire result set.
+ *
+ * Thin wrapper around _psqlRow() that applies the same decoding to every
+ * row in a 2-D array (e.g. the output of DB::table()->get() after _toArray()).
+ *
+ * Performance note: $JsonFields is flipped once here and passed pre-flipped
+ * to _psqlRow() on every iteration, avoiding an array_flip() call per row.
+ *
+ * @param  array $Data        Indexed array of associative rows.
+ * @param  array $JsonFields  Optional list of field names that must be treated
+ *                            as arrays even if they are not valid JSON
+ *                            (comma-separated fallback; empty value → []).
+ * @return array              Same structure as $Data with JSON fields decoded.
+ *                            Returns [] when $Data is not an array.
+ */
 function _psql($Data = [], $JsonFields = [])
 {
-//    $JsonFields = array_flip($JsonFields);
+    if (!is_array($Data)) return [];
+
+    if (!is_array($JsonFields)) $JsonFields = [];
+    $flippedFields = array_flip($JsonFields);
+
     foreach ($Data as $k => $v) {
-        $Data[$k] = _psqlRow($v, $JsonFields);
+        $result     = _psqlRow($v, $flippedFields, true);
+        $Data[$k]   = ($result !== false) ? $result : $v;
     }
 
     return $Data;
 }
 
-function _psqlRow($Data = [], $JsonFields = [])
+/**
+ * Decode JSON-encoded fields in a single associative row.
+ *
+ * Iterates over every scalar field in $Data and attempts to decode it.
+ * Only strings that begin with '{' or '[' are passed to json_decode — all
+ * other scalars (integers, dates, plain strings) are skipped entirely,
+ * avoiding unnecessary JSON parser invocations.
+ *
+ * -------------------------------------------------------------------------
+ * DECODING RULES PER FIELD
+ * -------------------------------------------------------------------------
+ *   1. Already an array          → left unchanged.
+ *   2. String starting with '{' or '[', valid JSON array/object
+ *                                → replaced with the decoded PHP array.
+ *   3. String starting with '{' or '[', invalid JSON + field in $JsonFields
+ *                                → comma-split fallback: explode(',', value).
+ *   4. Any other non-empty value + field in $JsonFields
+ *                                → comma-split fallback: explode(',', value).
+ *   5. Empty string + field in $JsonFields
+ *                                → replaced with [] (typed-empty array).
+ *   6. All other scalars         → left unchanged.
+ *
+ * -------------------------------------------------------------------------
+ * $preFlipped PARAMETER
+ * -------------------------------------------------------------------------
+ * When called from _psql(), the caller has already flipped $JsonFields once
+ * for the entire batch. Pass $preFlipped = true to skip the redundant
+ * array_flip() inside this function. When calling _psqlRow() directly,
+ * leave $preFlipped at its default (false) — flipping happens here.
+ *
+ * @param  array $Data        Single associative row from a DB result set.
+ * @param  array $JsonFields  Field names (values) or flipped map (keys) that
+ *                            must be treated as arrays. See $preFlipped.
+ * @param  bool  $preFlipped  True when $JsonFields has already been flipped
+ *                            by the caller (e.g. via _psql()). Default false.
+ * @return array|false        Decoded row, or false when $Data is not an array.
+ */
+function _psqlRow($Data = [], $JsonFields = [], $preFlipped = false)
 {
-    if(!is_array($JsonFields))$JsonFields = [];
-    $JsonFields = array_flip($JsonFields);
-    if(!is_array($Data)){
-//        p($Data);
-        return false;
-    }
+    if (!is_array($Data)) return false;
+
+    if (!is_array($JsonFields)) $JsonFields = [];
+    if (!$preFlipped) $JsonFields = array_flip($JsonFields);
 
     foreach ($Data as $kk => $vv) {
-        if (is_array($vv)) {
-            continue;
+        if (is_array($vv)) continue;
+
+        // Short-circuit: json_decode can only produce an array for '{' / '[' prefixed strings.
+        // Skip the JSON parser for all other scalars (integers, dates, short strings, etc.)
+        // and fall straight through to the $JsonFields fallback check.
+        if (is_string($vv) && $vv !== '' && ($vv[0] === '{' || $vv[0] === '[')) {
+            $tmp = json_decode($vv, 1);
+            if (is_array($tmp)) {
+                $Data[$kk] = $tmp;
+                continue;
+            }
         }
-        $tmp = json_decode($vv, 1);
-        if(!is_array($tmp) && strlen($vv)>0 && isset($JsonFields[$kk])) $tmp = explode(',', $vv);
 
-
-        if (is_array($tmp)) {
-            $Data[$kk] = $tmp;
-        } elseif (isset($JsonFields[$kk])) {
-            /// if field value is empty but it should be an array returns empty array
-            $Data[$kk] = [];
+        // Field declared as an array type but value was not valid JSON:
+        // fall back to comma-split, or store an empty array when the value is blank.
+        if (isset($JsonFields[$kk])) {
+            $Data[$kk] = ($vv !== '') ? explode(',', (string)$vv) : [];
         }
     }
-
 
     return $Data;
 }
 
+/**
+ * Decode a single JSON-encoded database cell value.
+ *
+ * Convenience wrapper around json_decode() for use when only one field
+ * value needs to be decoded rather than a full row or result set.
+ * Returns null when the string is not valid JSON.
+ *
+ * @param  string $Data  Raw string value as stored in the database.
+ * @return mixed         Decoded PHP value (array, scalar), or null on failure.
+ */
 function _psqlCell($Data = '')
 {
-    return json_decode($Data, 1);
-
+    return json_decode($Data, true);
 }
 
+/**
+ * Encode a value for storage as a JSON column in the database.
+ *
+ * Ensures every value written to an EAV 'val' column or a JSON-typed
+ * regular column is a valid non-empty string:
+ *
+ *   - Arrays are JSON-encoded with unicode preserved (JSON_UNESCAPED_UNICODE).
+ *   - null / '' / false are stored as '{}' rather than NULL or an empty
+ *     string, keeping the column value consistent and parseable on read.
+ *   - Scalar strings (already encoded) are returned as-is.
+ *
+ * NOTE: empty() is intentionally NOT used here because empty("0") is true —
+ * the string "0" is a valid scalar value and must not be replaced with "{}".
+ *
+ * @param  array|string|null $Data  Value to encode.
+ * @return string                   JSON string, or '{}' for blank/null input.
+ */
 function _psqlupd($Data = '')
 {
-    if(is_array($Data))$Data = json_encode($Data, JSON_UNESCAPED_UNICODE);
-    if(empty($Data))$Data = '{}';
+    if (is_array($Data)) $Data = json_encode($Data, JSON_UNESCAPED_UNICODE);
+    if ($Data === null || $Data === '' || $Data === false) $Data = '{}';
     return $Data;
 }
 

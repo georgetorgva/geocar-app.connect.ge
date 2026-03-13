@@ -149,7 +149,6 @@ class Main extends App\Http\Controllers\Api\ApiController
         $value = Cache::store('file')->get($cacheKey);
         if($value) return $value;
 
-        $ret['home_content'] = $this->getHomeContent();
 //        $ret['terms'] = $this->getAllTerms();
         $ret['widgets'] = $widgets->getWidgetsForSite(['locale'=>$ret['locale']]);
         $ret['generalPages'] = $content->getList(['slug'=>['privacy', 'terms-condition']]);
