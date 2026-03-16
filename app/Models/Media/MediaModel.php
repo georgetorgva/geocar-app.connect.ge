@@ -241,7 +241,7 @@ class MediaModel extends Model
 
         return $res;
     }
-
+    
     public function getIdByName( $name = '' ){
 
         $res = MediaModel::select('id')->where('name', $name)->first();

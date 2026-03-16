@@ -47,7 +47,7 @@ class Subscription extends Controller
 
     public function deleteSubscriber(Request $request)
     {
-        return $this->mainModel->deleteItem($request->id);
+        return $this->mainModel->deleteItem(['id' => $request->id]);
     }
 
     public function updateSubscriber(Request $request)
