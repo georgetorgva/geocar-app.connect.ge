@@ -80,9 +80,14 @@ return [
 
     'locale' => 'en',
     'locales' => [
-//        'ge' => 'ქარ',
+        'ge' => 'ქარ',
         'en' => 'Eng'
     ],
+
+    'website_url' => env('WEBSITE_URL', env('APP_URL', '#')),
+    'cache_indx'        => env('CACHE_INDX', 60),
+    'cache_single_view' => env('CACHE_SINGLE_VIEW', 60),
+    'cache_list_view'   => env('CACHE_LIST_VIEW', 60),
 
     'fallback_locale' => env('APP_FALLBACK_LOCALE', 'en'),
 
