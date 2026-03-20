@@ -208,6 +208,7 @@ class Main extends App\Http\Controllers\Api\ApiController
             'sitePlaceHolders' => config('app.sitePlaceHolders'),
             'static'           => config('filesystems.disks.public.url'),
             'smartLayouts'     => config('adminpanel.smartLayouts'),
+            'smartComponents'  => array_keys(config('adminpanel.smartComponents', [])),
             'contentTypes'     => $content->getContentTypes([
                 'exclude' => ['title', 'route', 'slug_field', 'searchable', 'taxonomy', 'fields', 'orderBy', 'relation'],
             ]),
